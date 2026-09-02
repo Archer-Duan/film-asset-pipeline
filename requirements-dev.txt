@@ -1,0 +1,22 @@
+# Install the project together with the common development toolchain.
+-e .
+
+# Testing, formatting, linting, and type checking
+pytest
+pytest-cov
+ruff
+black
+mypy
+
+# VS Code notebooks and common application utilities
+ipykernel
+requests
+httpx
+python-dotenv
+rich
+
+# Common data and image tooling
+pillow
+numpy
+pandas
+matplotlib

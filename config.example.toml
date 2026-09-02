@@ -1,0 +1,39 @@
+[paths]
+input_dir = "data/input"
+output_dir = "data/output"
+state_db = "data/state/pipeline.sqlite3"
+model_input = "data/output/manifest.json"
+model_output_dir = "data/models"
+model_state_db = "data/state/models.sqlite3"
+
+[ark]
+endpoint = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+model = "doubao-seedream-5-0-lite-260128"
+size = "2K"
+response_format = "b64_json"
+watermark = false
+mode = "group"
+max_images = 3
+prompt = "输入是带网页界面和文字说明的电影数据库截图。忽略网页标题、镜号、时间码、片名、字幕、边框和播放器控件，优先结合电影画面与页面物品描述，识别占据主要视觉、叙事焦点或被文字明确描述的单一实体物品。本次只处理一个物品，禁止自由改成其他品类。生成三张独立图片，三张必须是完全同一件物品：第一张为前侧四分之三视图，第二张为侧视图，第三张为后侧四分之三视图。所有视图必须保持相同的轮廓比例、年代、材质、颜色、纹理、雕刻、连接结构、磨损和设计细节，只允许视角不同，并可合理补全遮挡或画面外缺失结构。每张图只能出现该物品本体，物品完整、无遮挡、居中，使用纯白或浅灰色干净背景；不要人物、文字、水印、边框、环境、展示盒和其他道具，不要复杂投影，可保留轻微自然接触阴影。输出清晰、写实、适合作为图生3D参考图的完整资产视图。"
+
+[pipeline]
+concurrency = 2
+request_timeout_seconds = 600
+max_retries = 3
+
+[hunyuan]
+api_style = "tencentcloud_sdk"
+cloud_endpoint = "ai3d.tencentcloudapi.com"
+cloud_version = "2025-05-13"
+cloud_region = "ap-guangzhou"
+submit_endpoint = "https://api.ai3d.cloud.tencent.com/v1/ai3d/submit"
+query_endpoint = "https://api.ai3d.cloud.tencent.com/v1/ai3d/query"
+model = "hy-3d-3.1"
+enable_pbr = true
+face_count = 1000000
+generate_type = "Normal"
+concurrency = 1
+poll_interval_seconds = 15
+job_timeout_seconds = 1800
+request_timeout_seconds = 120
+max_retries = 3

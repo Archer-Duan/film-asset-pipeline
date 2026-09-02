@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "film-asset-pipeline"
+version = "0.5.0"
+description = "Batch movie-frame to clean asset images and GLB models"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "keyring>=25.6,<26",
+    "python-multipart>=0.0.20,<1",
+    "tencentcloud-sdk-python-common>=3.0.396",
+    "uvicorn>=0.34,<1",
+]
+
+[project.scripts]
+film-assets = "film_asset_pipeline.cli:main"
+film-assets-web = "film_asset_pipeline.web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+film_asset_pipeline = ["web_assets/*"]
+
+[tool.ruff.lint]
+# Keep CI focused on correctness while the older codebase is incrementally modernized.
+select = ["E4", "E7", "E9", "F"]

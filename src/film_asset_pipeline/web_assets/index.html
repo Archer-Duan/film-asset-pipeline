@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="app-version" content="0.5.0">
+  <title>Film Asset Workflow</title>
+  <link rel="stylesheet" href="/static/styles.css?v=0.5.0">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">FA</div>
+        <div><strong>Film Asset</strong><span>数字资产工作流</span></div>
+      </div>
+      <nav class="stage-nav" aria-label="资产阶段">
+        <button class="stage-link is-active" data-stage="all"><span>全部资产</span><b id="nav-total">0</b></button>
+        <button class="stage-link" data-stage="source_frames"><span>来源静帧</span><b id="nav-source-frames">0</b></button>
+        <button class="stage-link" data-stage="awaiting_2d"><span>待处理静帧</span><b id="nav-awaiting-2d">0</b></button>
+        <button class="stage-link" data-stage="image_review"><span>2D 待审核</span><b id="nav-image-review">0</b></button>
+        <button class="stage-link" data-stage="ready_for_3d"><span>待生成 3D</span><b id="nav-ready-3d">0</b></button>
+        <button class="stage-link" data-stage="model_generation"><span>3D 生成中</span><b id="nav-model-generation">0</b></button>
+        <button class="stage-link" data-stage="model_review"><span>3D 待审核</span><b id="nav-model-review">0</b></button>
+        <button class="stage-link" data-stage="approved"><span>审核通过</span><b id="nav-approved">0</b></button>
+        <button class="stage-link" data-stage="rejected"><span>已驳回</span><b id="nav-rejected">0</b></button>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="service-dot"></span>
+        <div><strong>本地工作区</strong><span id="service-status">正在检查模型配置…</span></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">VIRTUAL PRODUCTION ASSET PIPELINE</p>
+          <h1>电影数字资产工作台</h1>
+        </div>
+        <div class="top-actions">
+          <button id="open-settings" class="button" type="button">模型设置</button>
+          <label id="upload-action" class="upload-action">
+            <input id="frame-upload" type="file" accept="image/*" multiple>
+            <span id="upload-text">上传静帧</span>
+          </label>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="工作流概览">
+        <article><span>资产总数</span><strong id="metric-total">0</strong><small>当前项目</small></article>
+        <article><span>待处理</span><strong id="metric-pending">0</strong><small>2D审核与3D生成</small></article>
+        <article><span>3D 已生成</span><strong id="metric-models">0</strong><small>等待审核或已通过</small></article>
+        <article><span>审核通过</span><strong id="metric-approved">0</strong><small>可进入资产库</small></article>
+      </section>
+
+      <section class="toolbar" aria-label="资产操作">
+        <div class="toolbar-main">
+          <div class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="search" type="search" placeholder="搜索资产名称、标签或资产 ID">
+          </div>
+          <div class="display-controls" aria-label="排序与显示方式">
+            <select id="sort-order" aria-label="资产排序">
+              <option value="generated_desc">生成时间：最新优先</option>
+              <option value="generated_asc">生成时间：最早优先</option>
+              <option value="title_asc">名称：A–Z</option>
+              <option value="title_desc">名称：Z–A</option>
+            </select>
+            <div class="segmented" aria-label="显示方式">
+              <button id="view-grid" class="segment is-active" type="button" aria-pressed="true">图片</button>
+              <button id="view-list" class="segment" type="button" aria-pressed="false">列表</button>
+            </div>
+            <div id="thumbnail-sizes" class="segmented thumbnail-sizes" aria-label="缩略图大小">
+              <button class="segment" data-thumbnail-size="small" type="button" title="小缩略图">小</button>
+              <button class="segment is-active" data-thumbnail-size="medium" type="button" title="中缩略图">中</button>
+              <button class="segment" data-thumbnail-size="large" type="button" title="大缩略图">大</button>
+            </div>
+          </div>
+        </div>
+        <div class="stage-actions">
+          <div class="selection-summary">
+            <button id="select-visible" class="button button-quiet" type="button">全选当前视图</button>
+            <span id="selection-count">未选择资产</span>
+            <small id="stage-action-hint">进入具体环节后执行批量操作</small>
+          </div>
+          <div class="selection-actions">
+            <select id="image-output-count" class="stage-action" aria-label="每个静帧生成的2D图片数量" hidden>
+              <option value="1">单图 · 1 张完整视图</option>
+              <option value="3" selected>多视图 · 3 张</option>
+            </select>
+            <button id="process-2d" class="button button-primary stage-action" type="button" hidden disabled>优化选中静帧</button>
+            <button id="batch-approve" class="button button-primary stage-action" type="button" hidden disabled>批量通过</button>
+            <button id="batch-reject" class="button button-danger stage-action" type="button" hidden disabled>批量驳回</button>
+            <button id="resubmit-selected" class="button stage-action" type="button" hidden disabled>重新提交审核</button>
+            <select id="generation-profile" class="stage-action" aria-label="3D生成规格" hidden>
+            <option value="minimal">测试 · 默认50万面</option>
+            <option value="production">正式 · PBR + 100万面</option>
+            </select>
+            <button id="generate-selected" class="button button-primary stage-action" type="button" hidden disabled>生成选中资产</button>
+          </div>
+        </div>
+      </section>
+
+      <div class="content-heading">
+        <div><h2 id="view-title">全部资产</h2><p id="view-caption">查看从电影静帧到可交付 GLB 的完整链路</p></div>
+        <button id="refresh" class="icon-button" type="button" aria-label="刷新数据">↻</button>
+      </div>
+
+      <section id="asset-grid" class="asset-grid view-grid thumb-medium" aria-live="polite"></section>
+      <div id="empty-state" class="empty-state" hidden>
+        <strong>当前视图没有资产</strong>
+        <span>上传静帧或切换其他工作流阶段。</span>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="asset-dialog" class="asset-dialog">
+    <form method="dialog" class="dialog-shell">
+      <header>
+        <div><p class="eyebrow">ASSET REVIEW</p><h2 id="dialog-title">资产详情</h2></div>
+        <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
+      </header>
+      <div id="dialog-content"></div>
+    </form>
+  </dialog>
+
+  <dialog id="result-dialog" class="result-dialog" aria-labelledby="result-title">
+    <form method="dialog">
+      <div id="result-icon" class="result-icon" aria-hidden="true">✓</div>
+      <p class="eyebrow">WORKFLOW NOTICE</p>
+      <h2 id="result-title">任务完成</h2>
+      <p id="result-message" class="result-message"></p>
+      <button class="button button-primary" value="close">知道了</button>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+    <form id="credentials-form">
+      <header>
+        <div>
+          <p class="eyebrow">LOCAL MODEL CONFIGURATION</p>
+          <h2 id="settings-title">配置你自己的模型服务</h2>
+          <p>密钥只保存在这台电脑，页面和接口不会回传完整内容。</p>
+        </div>
+        <button id="close-settings" class="dialog-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="settings-body">
+        <section class="settings-section">
+          <div class="settings-section-title">
+            <div><span class="step-number">01</span><strong>即梦 2D 资产图</strong></div>
+            <span id="ark-config-state" class="config-state">未配置</span>
+          </div>
+          <label class="field">
+            <span>火山方舟 API Key</span>
+            <input id="ark-api-key" type="password" autocomplete="new-password" placeholder="输入新的 API Key；留空则保留现有配置">
+            <small id="ark-key-hint">用于 Seedream 5.0 Lite 图生图。</small>
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title">
+            <div><span class="step-number">02</span><strong>混元 3D</strong></div>
+            <span id="hunyuan-config-state" class="config-state">未配置</span>
+          </div>
+          <label class="field">
+            <span>接入方式</span>
+            <select id="hunyuan-api-style">
+              <option value="tencentcloud_sdk">腾讯云 SDK · SecretId / SecretKey</option>
+              <option value="ai3d_openai">OpenAI 兼容方式 · API Key</option>
+            </select>
+          </label>
+          <div id="sdk-credentials" class="credential-fields">
+            <label class="field"><span>SecretId</span><input id="tencent-secret-id" type="password" autocomplete="new-password" placeholder="留空则保留现有配置"></label>
+            <label class="field"><span>SecretKey</span><input id="tencent-secret-key" type="password" autocomplete="new-password" placeholder="留空则保留现有配置"></label>
+          </div>
+          <div id="openai-credentials" class="credential-fields" hidden>
+            <label class="field"><span>混元 3D API Key</span><input id="hunyuan-api-key" type="password" autocomplete="new-password" placeholder="留空则保留现有配置"></label>
+          </div>
+        </section>
+
+        <div class="privacy-note">
+          <strong>隐私与费用提示</strong>
+          <span>静帧和设计图会发送到你配置的模型服务。保存后的“检查配置”只做本地校验，不生成图片或模型，也不会产生生成费用。</span>
+        </div>
+      </div>
+      <footer class="settings-actions">
+        <button id="test-settings" class="button" type="button">检查配置</button>
+        <button class="button button-primary" type="submit">保存并继续</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div id="job-bar" class="job-bar" style="display:none" hidden>
+    <span class="spinner"></span>
+    <div class="job-content">
+      <strong id="job-title">任务执行中</strong><p id="job-message"></p>
+      <div class="job-progress" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100"><i id="job-progress-fill"></i></div>
+      <small id="job-stats"></small>
+    </div>
+  </div>
+  <div id="toast" class="toast" style="display:none" role="status" aria-live="polite" hidden></div>
+  <script src="/static/app.js?v=0.5.0" defer></script>
+</body>
+</html>
