@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>物体资产 · Film Asset</title><link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/objects.css"></head>
+<body><div class="object-shell">
+<header class="object-header"><div><p class="eyebrow">FILM ASSET / LOCAL COMPUTE</p><h1>物体资产</h1><p>从电影静帧到可交付模型 · 办公室共享算力</p></div><div class="top-actions"><span id="member"></span><a class="button" href="/">资产审核与资料库</a><button class="button" id="logout">退出</button></div></header>
+<main class="object-layout"><section class="object-panel"><h2>创建生成任务</h2>
+<form id="create-task"><label class="field">生成方式<select name="kind" id="kind"><option value="edit">补图 → 审核后生模</option><option value="model">完整参考图 → 生模</option><option value="full">原图 → 补图并生模</option></select></label>
+<label class="dropzone">选择参考图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp" multiple required><small>JPG / PNG / WebP · 每张最多 20MB · 每批最多 50 张</small></label><div id="input-previews" class="input-previews"></div>
+<label class="field" id="prompt-field">资产提示词<textarea id="prompt" rows="6" maxlength="8000" placeholder="例如：提取画面中央的青铜器，保留器型和纹样，补齐缺失的底部。留空使用工作流默认提示词。"></textarea><small>用于 Qwen 补图；单图生模直接根据图片生成。</small></label>
+<button class="button button-primary" id="submit" type="submit">加入生成队列</button><p id="submit-message" role="status"></p></form>
+<section class="service-panel"><h3>计算服务</h3><p id="service">正在检查本地工作流…</p><button class="button button-quiet" id="check">重新检查</button><p class="muted">任务在算力主机运行，关闭网页后仍会继续。多视图工作流已预留，待模型和裁剪配置就绪后启用。</p></section>
+<details id="admin-panel" hidden><summary>管理成员（仅主机本机）</summary><form id="add-member"><label class="field">账号<input id="new-name" required maxlength="64" autocomplete="off"></label><label class="field">密码<input id="new-password" type="password" required minlength="10" maxlength="256" autocomplete="new-password"></label><button class="button">创建／重置成员</button><p id="member-message" role="status"></p></form></details>
+</section><section class="task-area"><div class="content-heading"><div><h2>生成任务</h2><p>团队共享结果，按提交人追踪 · <span id="counts"></span></p></div><button class="button" id="refresh">刷新</button></div><p id="connection" role="status"></p><div id="tasks"></div></section></main></div>
+<dialog id="model-dialog"><button class="button" id="close-model">关闭</button><model-viewer id="model-preview" camera-controls shadow-intensity="1" alt="生成模型预览" style="width:75vw;height:70vh"></model-viewer><p id="model-error"></p></dialog>
+<script type="module" src="/static/model-viewer.min.js"></script>
+<script src="/static/objects.js"></script></body></html>

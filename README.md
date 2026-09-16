@@ -1,8 +1,14 @@
 # Film Asset Pipeline · 电影数字资产工作台
 
-一个自带密钥（BYOK）的本地开源工作台：批量读取电影静帧，调用火山方舟 Seedream 生成干净背景资产图，再调用腾讯混元生成 GLB/PBR 3D 资产。
+本地电影数字资产工作台：通过 ComfyUI 的 Qwen 工作流补全参考图，再使用 Pixal3D 生成 GLB；支持办公室成员通过网页共享主机算力。原 Seedream / 混元云端流水线和命令行保留兼容。
 
 当前版本包含 2D/3D 批处理、阶段审核、失败重试、进度提示、资产检索与本地 GLB 下载。项目采用 Apache-2.0 许可证。用户自行申请并承担第三方模型 API 费用；本地文件不会上传到本项目的开发者服务器，但生成请求中的图片会发送到用户配置的模型服务。
+
+## 本地算力与办公室共享
+
+已新增“物体资产”入口：参考图上传、Qwen 补图、Pixal3D 单图生模、运行状态、失败重试及 GLB 交互预览。补图与生模均可使用本地 ComfyUI，办公室同事通过成员登录共享本机算力。
+
+本机配置从 `comfy.example.json` 复制为 `comfy.local.json`，设置办公室网卡 `lan_address`，运行 `start_office_workbench.ps1`。详细部署、成员管理、工作流映射、CLI 与多视图接入边界见 [本地工作台说明](docs/LOCAL-COMFY-WORKBENCH.md)。
 
 ## Windows 快速安装
 

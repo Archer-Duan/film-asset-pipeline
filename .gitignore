@@ -21,3 +21,10 @@ data/state/*
 !data/output/.gitkeep
 !data/models/.gitkeep
 !data/state/.gitkeep
+
+comfy.local.json
+
+# Local generated assets, member/session databases and working tools
+data/local-assets/
+output/
+.dsh-vision-toolkit/

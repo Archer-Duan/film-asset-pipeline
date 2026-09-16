@@ -41,6 +41,7 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
+  if (response.status === 401) { location.href = "/login"; throw new Error("请先登录"); }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.detail || `请求失败：${response.status}`);
   return payload;
@@ -48,6 +49,12 @@ async function api(url, options = {}) {
 
 async function loadWorkspace() {
   state.workspace = await api("/api/workspace");
+  if (state.workspace.configuration?.local_enabled) {
+    $("#image-output-count").value = "1";
+    $("#image-output-count").disabled = true;
+    $("#generation-profile").innerHTML = '<option value="production">本地 Pixal3D · 工作流默认参数</option>';
+    $("#open-settings").textContent = "本地服务与成员";
+  }
   if (state.workspace.frontend_version && state.workspace.frontend_version !== FRONTEND_VERSION) {
     console.warn(`前后端版本暂时不同：${FRONTEND_VERSION} / ${state.workspace.frontend_version}`);
   }
@@ -65,6 +72,7 @@ function render() {
 
 function renderConfigurationStatus() {
   const configuration = state.workspace.configuration || {};
+  if (configuration.local_enabled) { $("#service-status").textContent = "Qwen / Pixal3D · 本地算力"; $(".service-dot").classList.remove("is-warning"); return; }
   const arkReady = Boolean(configuration.ark?.configured);
   const hunyuanReady = Boolean(configuration.hunyuan?.configured);
   const text = arkReady && hunyuanReady
@@ -510,7 +518,7 @@ async function process2D() {
   const outputCount = Number($("#image-output-count").value) === 1 ? 1 : 3;
   const outputDescription = outputCount === 1 ? "1 张完整主视图" : "3 张不同视图";
   const estimatedImages = assetIds.length * outputCount;
-  if (!confirm(`将调用即梦 API 处理 ${assetIds.length} 个来源静帧，每个来源生成${outputDescription}，预计最多返回 ${estimatedImages} 张图片，可能产生费用。确认继续？`)) return;
+  if (!state.workspace.configuration?.local_enabled && !confirm(`将调用即梦 API 处理 ${assetIds.length} 个来源静帧，每个来源生成${outputDescription}，预计最多返回 ${estimatedImages} 张图片，可能产生费用。确认继续？`)) return;
   try {
     const job = await api("/api/actions/process-2d", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -527,7 +535,7 @@ async function generateSelected() {
   const profile = $("#generation-profile").value;
   const info = state.workspace.profiles[profile];
   const estimate = (info?.estimated_credits || 0) * assetIds.length;
-  if (!confirm(`将为 ${assetIds.length} 项资产生成3D，预计最多消耗约 ${estimate} 积分。确认继续？`)) return;
+  if (!state.workspace.configuration?.local_enabled && !confirm(`将为 ${assetIds.length} 项资产生成3D，预计最多消耗约 ${estimate} 积分。确认继续？`)) return;
   try {
     const job = await api("/api/actions/generate-3d", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -659,6 +667,7 @@ function applySettingsStatus(configuration) {
 }
 
 async function openSettings() {
+  if (state.workspace.configuration?.local_enabled) { location.href="/objects"; return; }
   let configuration = state.workspace.configuration;
   if (!configuration) configuration = await api("/api/settings/status");
   applySettingsStatus(configuration);

@@ -137,18 +137,24 @@ def build_asset_inventory(
     model_manifest: Path,
     metadata: WorkflowStore,
     input_dir: Path | None = None,
+    extra_images: list[dict[str, Any]] | None = None,
+    extra_models: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     # manifest 是生成流水线的事实来源，审核库只保存人工编辑的元数据；这里把两者拼成页面视图。
-    image_rows = load_manifest(image_manifest)
-    model_rows = load_manifest(model_manifest)
+    image_rows = load_manifest(image_manifest) + (extra_images or [])
+    model_rows = load_manifest(model_manifest) + (extra_models or [])
     image_rows = _preferred_image_rows(image_rows, model_rows)
     assets: list[dict[str, Any]] = []
+    seen_asset_ids: set[str] = set()
     for row in image_rows:
         output_path = _existing_path(row.get("output_path"))
         if str(row.get("status")) != "complete" or output_path is None:
             continue
         output_hash = str(row.get("output_sha256") or row.get("source_sha256") or row.get("task_id"))
         asset_id = f"asset-{output_hash[:16]}"
+        if asset_id in seen_asset_ids:
+            continue
+        seen_asset_ids.add(asset_id)
         matching_models = [
             item
             for item in model_rows

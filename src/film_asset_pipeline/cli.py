@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         "retry-3d", help="人工确认后重置失败的 3D 任务"
     )
     retry_model_parser.add_argument("--task-id", help="只重置指定任务，避免批量误重试")
+    from .local_cli import add_commands
+    add_commands(subparsers)
     return parser
 
 
@@ -263,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config_path = Path(args.config)
     try:
+        if args.command.endswith("-local"):
+            from .local_cli import run
+            return run(args)
         if args.command == "init":
             return initialize_project(config_path)
         if args.command == "run":

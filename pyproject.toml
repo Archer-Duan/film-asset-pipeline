@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "film-asset-pipeline"
-version = "0.5.0"
+version = "1.0.0"
 description = "Batch movie-frame to clean asset images and GLB models"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "Pillow>=11,<13",
     "fastapi>=0.115,<1",
     "keyring>=25.6,<26",
     "python-multipart>=0.0.20,<1",
@@ -24,7 +25,7 @@ film-assets-web = "film_asset_pipeline.web:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-film_asset_pipeline = ["web_assets/*"]
+film_asset_pipeline = ["web_assets/*", "workflows/*.json"]
 
 [tool.ruff.lint]
 # Keep CI focused on correctness while the older codebase is incrementally modernized.

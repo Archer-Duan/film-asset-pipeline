@@ -32,6 +32,9 @@ from .credentials import (
 from .hunyuan_config import load_hunyuan_settings
 from .pipeline import SUPPORTED_SUFFIXES, sanitize_filename, sha256_file
 from .runtime import default_config_path
+from .local_engine import LocalEngine, local_config
+from .local_api import install_local_routes
+from .team_auth import TeamAuth
 from .state import utc_now
 from .workflow import (
     WorkflowStore,
@@ -42,7 +45,7 @@ from .workflow import (
 
 
 LOGGER = logging.getLogger(__name__)
-FRONTEND_VERSION = "0.5.0"
+FRONTEND_VERSION = "1.0.0"
 
 
 class AssetUpdate(BaseModel):
@@ -72,6 +75,7 @@ class ProcessImagesRequest(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=50)
     output_count: Literal[1, 3] = 3
     confirmation: Literal["PROCESS_2D"]
+    prompt: str = Field(default="", max_length=8000)
 
 
 class CredentialsUpdate(BaseModel):
@@ -158,15 +162,23 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
     jobs = JobManager()
     upload_lock = threading.RLock()
     assets_dir = Path(__file__).with_name("web_assets")
+    local_engine = LocalEngine(settings.root_dir)
+    local_enabled = local_engine.config.get("enabled", False)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        if local_enabled:
+            local_engine.start()
         yield
+        local_engine.close()
         jobs.close()
         metadata.close()
 
-    app = FastAPI(title="Film Asset Workflow", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="Film Asset Workflow", version="1.0.0", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=assets_dir), name="static")
+    TeamAuth(settings.root_dir).install(app)
+    install_local_routes(app, local_engine, assets_dir)
+    app.state.local_engine = local_engine
 
     @app.middleware("http")
     async def prevent_stale_frontend(request: Any, call_next: Any):
@@ -198,11 +210,14 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         )
 
     def inventory() -> list[dict[str, Any]]:
+        local_images, local_models = local_engine.manifest_rows()
         return build_asset_inventory(
             settings.output_dir / "manifest.json",
             model_settings.output_dir / "manifest-3d.json",
             metadata,
             settings.input_dir,
+            local_images,
+            local_models,
         )
 
     def find_asset(asset_id: str) -> dict[str, Any]:
@@ -409,7 +424,18 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         }
 
     @app.post("/api/actions/process-2d", status_code=202)
-    def process_2d(body: ProcessImagesRequest) -> dict[str, Any]:
+    def process_2d(body: ProcessImagesRequest, request: Request) -> dict[str, Any]:
+        if local_enabled:
+            if body.output_count != 1:
+                raise HTTPException(400, "本地 Qwen 当前生成单张补全图，多视图生成工作流尚未接入")
+            selected = [find_asset(aid) for aid in dict.fromkeys(body.asset_ids)]
+            if any(a.get("model_status") == "complete" for a in selected):
+                raise HTTPException(409, "已完成模型的资产不能直接覆盖补图")
+            sources = list(dict.fromkeys(a["source_path"] for a in selected))
+            try:
+                return local_engine.submit(sources, "edit", body.prompt, request.state.member)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(409, str(exc)) from exc
         current_settings = load_settings(config_path)
         try:
             current_settings.validate(require_key=True)
@@ -498,7 +524,16 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         return jobs.start("process-2d", run_selected)
 
     @app.post("/api/actions/generate-3d", status_code=202)
-    def generate_3d(body: GenerateRequest) -> dict[str, Any]:
+    def generate_3d(body: GenerateRequest, request: Request) -> dict[str, Any]:
+        if local_enabled:
+            selected = [find_asset(aid) for aid in dict.fromkeys(body.asset_ids)]
+            if any(a["image_review"] != "approved" for a in selected):
+                raise HTTPException(409, "请先通过图片审核")
+            try:
+                return local_engine.submit([a["image_path"] for a in selected], "model", owner=request.state.member,
+                                           originals=[a["source_path"] for a in selected])
+            except (ValueError, OSError) as exc:
+                raise HTTPException(409, str(exc)) from exc
         current_model_settings = load_hunyuan_settings(config_path)
         try:
             current_model_settings.validate(require_key=True)
@@ -572,6 +607,8 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict[str, Any]:
         try:
+            if len(job_id) == 32:
+                return local_engine.group(job_id)
             return jobs.get(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="任务不存在") from exc
@@ -597,7 +634,8 @@ def _configuration_status(config_path: Path) -> dict[str, Any]:
     else:
         hunyuan_configured = bool(values["HUNYUAN_3D_API_KEY"])
     return {
-        "setup_required": not bool(image_settings.api_key),
+        "setup_required": not bool(image_settings.api_key) and not local_config(root).get("enabled", False),
+        "local_enabled": local_config(root).get("enabled", False),
         "ark": {
             "configured": bool(image_settings.api_key),
             "masked_key": masked(image_settings.api_key),

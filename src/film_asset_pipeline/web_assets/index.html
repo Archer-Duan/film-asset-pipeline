@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="app-version" content="0.5.0">
+  <meta name="app-version" content="1.0.0">
   <title>Film Asset Workflow</title>
-  <link rel="stylesheet" href="/static/styles.css?v=0.5.0">
+  <link rel="stylesheet" href="/static/styles.css?v=1.0.0">
 </head>
 <body>
   <div class="app-shell">
@@ -15,6 +15,7 @@
         <div><strong>Film Asset</strong><span>数字资产工作流</span></div>
       </div>
       <nav class="stage-nav" aria-label="资产阶段">
+        <a class="stage-link" href="/objects">物体资产 · 本地生成</a>
         <button class="stage-link is-active" data-stage="all"><span>全部资产</span><b id="nav-total">0</b></button>
         <button class="stage-link" data-stage="source_frames"><span>来源静帧</span><b id="nav-source-frames">0</b></button>
         <button class="stage-link" data-stage="awaiting_2d"><span>待处理静帧</span><b id="nav-awaiting-2d">0</b></button>
@@ -199,6 +200,6 @@
     </div>
   </div>
   <div id="toast" class="toast" style="display:none" role="status" aria-live="polite" hidden></div>
-  <script src="/static/app.js?v=0.5.0" defer></script>
+  <script src="/static/app.js?v=1.0.0" defer></script>
 </body>
 </html>
