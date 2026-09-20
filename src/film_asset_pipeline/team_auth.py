@@ -85,15 +85,17 @@ class TeamAuth:
             return token
 
     def member(self, request):
-        if request.client and request.client.host in ("127.0.0.1", "::1", "testclient"):
-            return "local"
         token = request.cookies.get("workbench_session", "")
         with self.connect() as db:
             row = db.execute(
                 "SELECT name FROM sessions WHERE token=? AND expires>?",
                 (hashlib.sha256(token.encode()).hexdigest(), time.time()),
             ).fetchone()
-            return row[0] if row else None
+            if row:
+                return row[0]
+        if request.client and request.client.host in ("127.0.0.1", "::1", "testclient"):
+            return "local"
+        return None
 
     def install(self, app):
         @app.middleware("http")

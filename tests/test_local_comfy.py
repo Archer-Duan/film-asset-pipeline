@@ -230,7 +230,7 @@ class EngineTests(unittest.TestCase):
         finally:
             metadata.close()
 
-    def test_multiview_stays_disabled_without_model_download(self):
+    def test_multiview_rejects_ungrouped_single_image(self):
         with self.assertRaises(ValueError):
             self.engine.submit([self.source], "multiview")
         self.assertEqual(self.engine.rows(), [])

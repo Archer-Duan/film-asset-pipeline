@@ -129,7 +129,11 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return []
-    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+    return (
+        [row for row in payload if isinstance(row, dict)]
+        if isinstance(payload, list)
+        else []
+    )
 
 
 def build_asset_inventory(
@@ -139,6 +143,7 @@ def build_asset_inventory(
     input_dir: Path | None = None,
     extra_images: list[dict[str, Any]] | None = None,
     extra_models: list[dict[str, Any]] | None = None,
+    extra_sources: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     # manifest 是生成流水线的事实来源，审核库只保存人工编辑的元数据；这里把两者拼成页面视图。
     image_rows = load_manifest(image_manifest) + (extra_images or [])
@@ -146,11 +151,24 @@ def build_asset_inventory(
     image_rows = _preferred_image_rows(image_rows, model_rows)
     assets: list[dict[str, Any]] = []
     seen_asset_ids: set[str] = set()
+    source_aliases = {}
+    hashes = {}
+
+    def file_hash(value):
+        path = _existing_path(value)
+        if path is None:
+            return None
+        if path not in hashes:
+            hashes[path] = _file_sha256(path)
+        return hashes[path]
+
     for row in image_rows:
         output_path = _existing_path(row.get("output_path"))
         if str(row.get("status")) != "complete" or output_path is None:
             continue
-        output_hash = str(row.get("output_sha256") or row.get("source_sha256") or row.get("task_id"))
+        output_hash = str(
+            row.get("output_sha256") or row.get("source_sha256") or row.get("task_id")
+        )
         asset_id = f"asset-{output_hash[:16]}"
         if asset_id in seen_asset_ids:
             continue
@@ -158,7 +176,11 @@ def build_asset_inventory(
         matching_models = [
             item
             for item in model_rows
-            if _same_path(item.get("source_path"), output_path)
+            if (
+                _same_path(item.get("source_path"), output_path)
+                or file_hash(item.get("source_path")) == file_hash(output_path)
+            )
+            and item.get("artifact_id") == row.get("model_artifact_id")
         ]
         # 同一张 2D 图可能有多条 3D 记录，选择排序最高的一条作为当前展示状态。
         model = max(matching_models, key=_model_rank, default=None)
@@ -184,12 +206,28 @@ def build_asset_inventory(
             if result_count > 1
             else source_name
         )
-        title = saved["title"] or default_title
+        title = saved["title"] or row.get("title") or default_title
         model_status = str(model.get("status")) if model else "not_started"
         stage = _stage(inferred_image_review, saved["model_review"], model_status)
         assets.append(
             {
                 "asset_id": asset_id,
+                "is_source": False,
+                "task_ids": list(
+                    dict.fromkeys(
+                        [
+                            str(r.get("task_id") or "")
+                            for r in image_rows
+                            if r.get("output_sha256") == output_hash
+                        ]
+                        + [str(m.get("task_id") or "") for m in matching_models]
+                    )
+                ),
+                "source_paths": row.get("source_paths")
+                or [str(row.get("source_path") or "")],
+                "generation_error": str(model.get("error_message") or "")
+                if model_status == "failed" and model
+                else "",
                 "title": title,
                 "tags": saved["tags"],
                 "notes": saved["notes"],
@@ -217,12 +255,14 @@ def build_asset_inventory(
                 "enable_pbr": bool(model.get("enable_pbr")) if model else None,
                 "credits_consumed": model.get("credits_consumed") if model else None,
                 "generated_at": (
-                    model.get("updated_at") if model and model.get("updated_at") else row.get("updated_at")
+                    model.get("updated_at")
+                    if model and model.get("updated_at")
+                    else row.get("updated_at")
                 ),
                 "updated_at": saved["updated_at"] or row.get("updated_at"),
             }
         )
-    if input_dir is not None:
+    if input_dir is not None or extra_sources:
         failed_by_hash: dict[str, dict[str, Any]] = {}
         failed_by_path: dict[Path, dict[str, Any]] = {}
         for row in image_rows:
@@ -250,19 +290,53 @@ def build_asset_inventory(
             if str(row.get("status")) == "complete" and row.get("source_sha256")
         }
         seen_hashes: set[str] = set()
-        if input_dir.is_dir():
-            for source_path in sorted(input_dir.rglob("*")):
-                if (
-                    not source_path.is_file()
-                    or source_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}
-                ):
+        source_info = {}
+        for item in extra_sources or []:
+            path = Path(item["path"]).resolve()
+            if str(item.get("updated_at", "")) >= str(
+                source_info.get(path, {}).get("updated_at", "")
+            ):
+                source_info[path] = item
+        paths = (
+            set(input_dir.rglob("*"))
+            if input_dir is not None and input_dir.is_dir()
+            else set()
+        )
+        paths.update(source_info)
+        if paths:
+            for source_path in sorted(paths):
+                if not source_path.is_file() or source_path.suffix.lower() not in {
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                }:
                     continue
+                info = source_info.get(source_path.resolve(), {})
                 source_hash = _file_sha256(source_path)
+                source_aliases[source_path.resolve()] = f"frame-{source_hash[:16]}"
                 if source_hash in seen_hashes:
+                    existing_source = next(
+                        a
+                        for a in assets
+                        if a["asset_id"] == f"frame-{source_hash[:16]}"
+                    )
+                    existing_source["task_ids"] = list(
+                        dict.fromkeys(
+                            existing_source["task_ids"]
+                            + [
+                                str(x["task_id"])
+                                for x in (extra_sources or [])
+                                if Path(x["path"]).resolve() == source_path.resolve()
+                            ]
+                        )
+                    )
                     continue
                 seen_hashes.add(source_hash)
                 source_processed = (
-                    source_path.resolve() in processed_sources or source_hash in processed_hashes
+                    source_path.resolve() in processed_sources
+                    or source_hash in processed_hashes
+                    or info.get("processed", False)
                 )
                 asset_id = f"frame-{source_hash[:16]}"
                 saved = metadata.get(asset_id)
@@ -273,27 +347,55 @@ def build_asset_inventory(
                 assets.append(
                     {
                         "asset_id": asset_id,
-                        "title": saved["title"] or source_path.stem.split("__", 1)[0],
+                        "title": saved["title"]
+                        or info.get("title")
+                        or source_path.stem.split("__", 1)[0],
+                        "is_source": True,
+                        "task_ids": list(
+                            dict.fromkeys(
+                                str(x["task_id"])
+                                for x in (extra_sources or [])
+                                if Path(x["path"]).resolve() == source_path.resolve()
+                            )
+                        ),
+                        "source_paths": [],
+                        "generation_error": info.get("message", "")
+                        if info.get("status") == "failed"
+                        else "",
                         "tags": saved["tags"],
                         "notes": saved["notes"],
-                        "stage": "source_frame" if source_processed else "awaiting_2d",
-                        "source_status": "processed" if source_processed else "awaiting_2d",
+                        "stage": "image_generation"
+                        if info.get("status") == "processing"
+                        else "generation_failed"
+                        if info.get("status") == "failed" and not source_processed
+                        else "source_frame"
+                        if source_processed
+                        else "awaiting_2d",
+                        "source_status": "processed"
+                        if source_processed
+                        else "awaiting_2d",
                         "image_review": "pending",
                         "model_review": "pending",
                         "source_path": str(source_path.resolve()),
                         "source_name": source_name,
                         "source_file_name": source_path.name,
-                        "target_name": _automatic_target_name(saved["title"] or source_name),
+                        "target_name": _automatic_target_name(
+                            saved["title"] or source_name
+                        ),
                         "image_path": str(source_path.resolve()),
                         "image_task_id": (
                             str(failed_row.get("task_id") or "") if failed_row else None
                         ),
                         "image_model": None,
                         "image_error_code": (
-                            str(failed_row.get("error_code") or "") if failed_row else None
+                            str(failed_row.get("error_code") or "")
+                            if failed_row
+                            else None
                         ),
                         "image_error_message": (
-                            str(failed_row.get("error_message") or "") if failed_row else None
+                            str(failed_row.get("error_message") or "")
+                            if failed_row
+                            else None
                         ),
                         "image_attempts": (
                             int(failed_row.get("attempts") or 0) if failed_row else 0
@@ -308,12 +410,35 @@ def build_asset_inventory(
                         "generated_at": datetime.fromtimestamp(
                             source_path.stat().st_mtime, tz=UTC
                         ).isoformat(),
-                        "updated_at": saved["updated_at"] or datetime.fromtimestamp(
+                        "updated_at": saved["updated_at"]
+                        or datetime.fromtimestamp(
                             source_path.stat().st_mtime, tz=UTC
                         ).isoformat(),
                     }
                 )
-    return sorted(assets, key=lambda item: (item["stage"], item["title"], item["asset_id"]))
+    source_ids = {
+        Path(a["source_path"]).resolve(): a["asset_id"]
+        for a in assets
+        if a.get("is_source")
+    }
+    source_ids.update(source_aliases)
+    for asset in assets:
+        asset["source_asset_ids"] = list(
+            dict.fromkeys(
+                source_ids[p]
+                for value in asset.pop("source_paths", [])
+                if value and (p := Path(value).resolve()) in source_ids
+            )
+        )
+    for asset in assets:
+        asset["related_asset_ids"] = [
+            a["asset_id"]
+            for a in assets
+            if asset["asset_id"] in a.get("source_asset_ids", [])
+        ]
+    return sorted(
+        assets, key=lambda item: (item["stage"], item["title"], item["asset_id"])
+    )
 
 
 def inventory_summary(assets: list[dict[str, Any]]) -> dict[str, int]:
@@ -322,6 +447,8 @@ def inventory_summary(assets: list[dict[str, Any]]) -> dict[str, int]:
         "source_frames": 0,
         "awaiting_2d": 0,
         "image_review": 0,
+        "image_generation": 0,
+        "generation_failed": 0,
         "ready_for_3d": 0,
         "model_generation": 0,
         "model_review": 0,
@@ -330,10 +457,9 @@ def inventory_summary(assets: list[dict[str, Any]]) -> dict[str, int]:
     }
     for asset in assets:
         stage = str(asset["stage"])
-        if stage in {"source_frame", "awaiting_2d"}:
+        if asset.get("is_source") or stage in {"source_frame", "awaiting_2d"}:
             summary["source_frames"] += 1
-        if stage != "source_frame":
-            summary["total"] += 1
+        summary["total"] += 1
         if stage in summary:
             summary[stage] += 1
     return summary
@@ -358,8 +484,21 @@ def _automatic_target_name(value: str) -> str | None:
     if "· 资产" in candidate:
         candidate = candidate.split("· 资产", 1)[0].strip()
     lowered = candidate.lower().replace("-", "").replace("_", "").replace(" ", "")
-    generic_prefixes = ("frame", "image", "img", "screenshot", "screen", "截图", "屏幕截图", "微信图片")
-    if not candidate or candidate.isdigit() or any(lowered.startswith(prefix) for prefix in generic_prefixes):
+    generic_prefixes = (
+        "frame",
+        "image",
+        "img",
+        "screenshot",
+        "screen",
+        "截图",
+        "屏幕截图",
+        "微信图片",
+    )
+    if (
+        not candidate
+        or candidate.isdigit()
+        or any(lowered.startswith(prefix) for prefix in generic_prefixes)
+    ):
         return None
     return candidate[:80]
 
@@ -385,9 +524,14 @@ def _preferred_image_rows(
         if not completed:
             continue
         sample = completed[0]
-        source_key = str(sample.get("source_sha256") or sample.get("source_path") or task_id)
+        source_key = str(
+            sample.get("source_sha256") or sample.get("source_path") or task_id
+        )
         updated_at = max(str(row.get("updated_at") or "") for row in completed)
-        if source_key not in preferred_by_source or updated_at > preferred_by_source[source_key][0]:
+        if (
+            source_key not in preferred_by_source
+            or updated_at > preferred_by_source[source_key][0]
+        ):
             preferred_by_source[source_key] = (updated_at, task_id)
 
     keep_task_ids = {task_id for _, task_id in preferred_by_source.values()}
@@ -407,7 +551,8 @@ def _preferred_image_rows(
     return [
         row
         for row in image_rows
-        if str(row.get("task_id") or "") in keep_task_ids
+        if row.get("keep_history")
+        or str(row.get("task_id") or "") in keep_task_ids
         or str(row.get("status")) != "complete"
     ]
 
@@ -454,7 +599,9 @@ def _stage(image_review: str, model_review: str, model_status: str) -> str:
         return "rejected"
     if image_review != "approved":
         return "image_review"
-    if model_status == "not_started" or model_status == "failed":
+    if model_status == "failed":
+        return "generation_failed"
+    if model_status == "not_started":
         return "ready_for_3d"
     if model_status != "complete":
         return "model_generation"

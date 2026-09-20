@@ -3,55 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="app-version" content="1.0.0">
+  <meta name="app-version" content="1.2.0">
   <title>Film Asset Workflow</title>
-  <link rel="stylesheet" href="/static/styles.css?v=1.0.0">
+  <link rel="stylesheet" href="/static/styles.css?v=1.2.0">
+  <link rel="stylesheet" href="/static/workbench-shell.css?v=1.2.0">
+<script type="module" src="/static/model-viewer.min.js"></script>
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">FA</div>
-        <div><strong>Film Asset</strong><span>数字资产工作流</span></div>
-      </div>
-      <nav class="stage-nav" aria-label="资产阶段">
-        <a class="stage-link" href="/objects">物体资产 · 本地生成</a>
-        <button class="stage-link is-active" data-stage="all"><span>全部资产</span><b id="nav-total">0</b></button>
-        <button class="stage-link" data-stage="source_frames"><span>来源静帧</span><b id="nav-source-frames">0</b></button>
-        <button class="stage-link" data-stage="awaiting_2d"><span>待处理静帧</span><b id="nav-awaiting-2d">0</b></button>
-        <button class="stage-link" data-stage="image_review"><span>2D 待审核</span><b id="nav-image-review">0</b></button>
-        <button class="stage-link" data-stage="ready_for_3d"><span>待生成 3D</span><b id="nav-ready-3d">0</b></button>
-        <button class="stage-link" data-stage="model_generation"><span>3D 生成中</span><b id="nav-model-generation">0</b></button>
-        <button class="stage-link" data-stage="model_review"><span>3D 待审核</span><b id="nav-model-review">0</b></button>
-        <button class="stage-link" data-stage="approved"><span>审核通过</span><b id="nav-approved">0</b></button>
-        <button class="stage-link" data-stage="rejected"><span>已驳回</span><b id="nav-rejected">0</b></button>
-      </nav>
-      <div class="sidebar-foot">
-        <span class="service-dot"></span>
-        <div><strong>本地工作区</strong><span id="service-status">正在检查模型配置…</span></div>
-      </div>
-    </aside>
+    <aside class="sidebar" aria-label="工作台导航"></aside>
 
     <main class="workspace">
       <header class="topbar">
         <div>
           <p class="eyebrow">VIRTUAL PRODUCTION ASSET PIPELINE</p>
-          <h1>电影数字资产工作台</h1>
+          <h1>资产库</h1><p class="muted">从原始素材、生成图片到交付模型，统一查看与审核。</p>
         </div>
         <div class="top-actions">
           <button id="open-settings" class="button" type="button">模型设置</button>
           <label id="upload-action" class="upload-action">
             <input id="frame-upload" type="file" accept="image/*" multiple>
-            <span id="upload-text">上传静帧</span>
-          </label>
+            <span id="upload-text">上传素材</span>
+          </label><div id="account-slot"></div>
         </div>
       </header>
 
       <section class="metrics" aria-label="工作流概览">
         <article><span>资产总数</span><strong id="metric-total">0</strong><small>当前项目</small></article>
-        <article><span>待处理</span><strong id="metric-pending">0</strong><small>2D审核与3D生成</small></article>
+        <article><span>待处理</span><strong id="metric-pending">0</strong><small>图片审核与模型生成</small></article>
         <article><span>3D 已生成</span><strong id="metric-models">0</strong><small>等待审核或已通过</small></article>
-        <article><span>审核通过</span><strong id="metric-approved">0</strong><small>可进入资产库</small></article>
+        <article><span>已通过模型</span><strong id="metric-approved">0</strong><small>可下载交付</small></article>
       </section>
 
       <section class="toolbar" aria-label="资产操作">
@@ -84,10 +65,10 @@
             <span id="selection-count">未选择资产</span>
             <small id="stage-action-hint">进入具体环节后执行批量操作</small>
           </div>
-          <div class="selection-actions">
+          <div class="selection-actions"><button id="download-selected" class="button button-primary" type="button" disabled>批量下载</button>
             <select id="image-output-count" class="stage-action" aria-label="每个静帧生成的2D图片数量" hidden>
               <option value="1">单图 · 1 张完整视图</option>
-              <option value="3" selected>多视图 · 3 张</option>
+              <option value="3" selected>云端多角度 · 3 张</option>
             </select>
             <button id="process-2d" class="button button-primary stage-action" type="button" hidden disabled>优化选中静帧</button>
             <button id="batch-approve" class="button button-primary stage-action" type="button" hidden disabled>批量通过</button>
@@ -200,6 +181,7 @@
     </div>
   </div>
   <div id="toast" class="toast" style="display:none" role="status" aria-live="polite" hidden></div>
-  <script src="/static/app.js?v=1.0.0" defer></script>
+  <script src="/static/workbench-shell.js?v=1.2.0"></script>
+  <script src="/static/app.js?v=1.2.0" defer></script>
 </body>
 </html>

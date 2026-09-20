@@ -9,6 +9,9 @@ import subprocess
 import sys
 import threading
 import uuid
+import json
+import tempfile
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,6 +21,8 @@ import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
+from .asset_files import download_name
 from pydantic import BaseModel, Field
 
 from .config import load_settings
@@ -45,7 +50,7 @@ from .workflow import (
 
 
 LOGGER = logging.getLogger(__name__)
-FRONTEND_VERSION = "1.0.0"
+FRONTEND_VERSION = "1.2.0"
 
 
 class AssetUpdate(BaseModel):
@@ -65,6 +70,11 @@ class BatchReviewRequest(BaseModel):
     decision: Literal["pending", "approved", "rejected"]
 
 
+class DownloadRequest(BaseModel):
+    asset_ids: list[str] = Field(min_length=1, max_length=100)
+    kind: Literal["model", "image", "source"] = "model"
+
+
 class GenerateRequest(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=50)
     profile: Literal["minimal", "production"] = "minimal"
@@ -82,22 +92,30 @@ class CredentialsUpdate(BaseModel):
     ark_api_key: str | None = Field(default=None, max_length=1024, repr=False)
     hunyuan_api_style: Literal["tencentcloud_sdk", "ai3d_openai"] = "tencentcloud_sdk"
     hunyuan_api_key: str | None = Field(default=None, max_length=1024, repr=False)
-    tencentcloud_secret_id: str | None = Field(default=None, max_length=1024, repr=False)
-    tencentcloud_secret_key: str | None = Field(default=None, max_length=1024, repr=False)
+    tencentcloud_secret_id: str | None = Field(
+        default=None, max_length=1024, repr=False
+    )
+    tencentcloud_secret_key: str | None = Field(
+        default=None, max_length=1024, repr=False
+    )
 
 
 class CredentialDeleteRequest(BaseModel):
-    names: list[Literal[
-        "ARK_API_KEY",
-        "HUNYUAN_3D_API_KEY",
-        "TENCENTCLOUD_SECRET_ID",
-        "TENCENTCLOUD_SECRET_KEY",
-    ]] = Field(min_length=1, max_length=4)
+    names: list[
+        Literal[
+            "ARK_API_KEY",
+            "HUNYUAN_3D_API_KEY",
+            "TENCENTCLOUD_SECRET_ID",
+            "TENCENTCLOUD_SECRET_KEY",
+        ]
+    ] = Field(min_length=1, max_length=4)
 
 
 class JobManager:
     def __init__(self) -> None:
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-job")
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="workflow-job"
+        )
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
 
@@ -137,6 +155,7 @@ class JobManager:
 
     def _run(self, job_id: str, fn: Any) -> None:
         self._set(job_id, status="running", message="任务执行中")
+
         def update(message: str, **progress: Any) -> None:
             self._set(job_id, message=message, progress=progress)
 
@@ -174,7 +193,7 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         jobs.close()
         metadata.close()
 
-    app = FastAPI(title="Film Asset Workflow", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="Film Asset Workflow", version="1.2.0", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=assets_dir), name="static")
     TeamAuth(settings.root_dir).install(app)
     install_local_routes(app, local_engine, assets_dir)
@@ -183,7 +202,11 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
     @app.middleware("http")
     async def prevent_stale_frontend(request: Any, call_next: Any):
         response = await call_next(request)
-        if request.url.path == "/" or request.url.path == "/api/workspace" or request.url.path.startswith("/static/"):
+        if (
+            request.url.path == "/"
+            or request.url.path == "/api/workspace"
+            or request.url.path.startswith("/static/")
+        ):
             response.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
@@ -218,10 +241,15 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
             settings.input_dir,
             local_images,
             local_models,
+            local_engine.source_rows(),
         )
 
+    app.state.asset_inventory = inventory
+
     def find_asset(asset_id: str) -> dict[str, Any]:
-        asset = next((item for item in inventory() if item["asset_id"] == asset_id), None)
+        asset = next(
+            (item for item in inventory() if item["asset_id"] == asset_id), None
+        )
         if asset is None:
             raise HTTPException(status_code=404, detail="资产不存在")
         return asset
@@ -243,7 +271,10 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
             "assets": [_public_asset(item) for item in assets],
             "profiles": {
                 "minimal": {"label": "测试 · 默认50万面", "estimated_credits": 20},
-                "production": {"label": "正式 · PBR + 100万面", "estimated_credits": 45},
+                "production": {
+                    "label": "正式 · PBR + 100万面",
+                    "estimated_credits": 45,
+                },
             },
             "configuration": _configuration_status(config_path),
         }
@@ -273,12 +304,16 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         status = _configuration_status(config_path)
         status["saved"] = True
         status["storage_backend"] = (
-            "system_keyring" if storage_backends == {"system_keyring"} else "local_env_file"
+            "system_keyring"
+            if storage_backends == {"system_keyring"}
+            else "local_env_file"
         )
         return status
 
     @app.delete("/api/settings/credentials")
-    def remove_credentials(body: CredentialDeleteRequest, request: Request) -> dict[str, Any]:
+    def remove_credentials(
+        body: CredentialDeleteRequest, request: Request
+    ) -> dict[str, Any]:
         _require_local_request(request)
         for name in body.names:
             delete_secret(name, settings.root_dir)
@@ -324,7 +359,70 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         if not path.is_file():
             raise HTTPException(status_code=404, detail="文件不存在")
         disposition = "attachment" if kind == "model" else "inline"
-        return FileResponse(path, filename=path.name, content_disposition_type=disposition)
+        return FileResponse(
+            path,
+            filename=download_name(asset, kind, path.suffix),
+            content_disposition_type=disposition,
+        )
+
+    @app.post("/api/actions/download")
+    def batch_download(body: DownloadRequest):
+        assets = {a["asset_id"]: a for a in inventory()}
+        selected = []
+        for aid in dict.fromkeys(body.asset_ids):
+            if aid not in assets:
+                raise HTTPException(404, "所选资产不存在，请刷新后重试")
+            asset = assets[aid]
+            value = asset.get(
+                {"model": "model_path", "image": "image_path", "source": "source_path"}[
+                    body.kind
+                ]
+            )
+            if not value or not Path(value).is_file():
+                raise HTTPException(
+                    409, f"{asset['title']} 的下载文件不存在；本次未打包，请重新选择"
+                )
+            if body.kind == "model" and asset["model_status"] != "complete":
+                raise HTTPException(409, "所选模型尚未生成完成")
+            selected.append((asset, Path(value)))
+        if sum(p.stat().st_size for _, p in selected) > 5 * 1024**3:
+            raise HTTPException(413, "单次下载最多 5GB，请分批选择")
+        folder = local_engine.folder / "downloads"
+        folder.mkdir(exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(suffix=".zip", dir=folder, delete=False)
+        path = Path(handle.name)
+        handle.close()
+        try:
+            with zipfile.ZipFile(
+                path, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+            ) as archive:
+                manifest = []
+                for asset, file in selected:
+                    name = download_name(asset, body.kind, file.suffix)
+                    archive.write(file, arcname=name)
+                    manifest.append(
+                        {
+                            "asset_id": asset["asset_id"],
+                            "title": asset["title"],
+                            "file": name,
+                            "tags": asset["tags"],
+                            "review": asset["model_review"]
+                            if body.kind == "model"
+                            else asset["image_review"],
+                        }
+                    )
+                archive.writestr(
+                    "资产清单.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+                )
+            return FileResponse(
+                path,
+                media_type="application/zip",
+                filename=f"资产批量下载_{body.kind}_{len(selected)}项.zip",
+                background=BackgroundTask(path.unlink, missing_ok=True),
+            )
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
 
     @app.patch("/api/assets/{asset_id}")
     def update_asset(asset_id: str, body: AssetUpdate) -> dict[str, Any]:
@@ -344,11 +442,17 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         selected = [find_asset(asset_id) for asset_id in dict.fromkeys(body.asset_ids)]
         if body.stage == "auto":
             if body.decision != "pending":
-                raise HTTPException(status_code=400, detail="重新提交审核时，审核状态必须为待审核")
-            invalid = [asset["title"] for asset in selected if asset["stage"] != "rejected"]
+                raise HTTPException(
+                    status_code=400, detail="重新提交审核时，审核状态必须为待审核"
+                )
+            invalid = [
+                asset["title"] for asset in selected if asset["stage"] != "rejected"
+            ]
         else:
             expected_stage = "image_review" if body.stage == "image" else "model_review"
-            invalid = [asset["title"] for asset in selected if asset["stage"] != expected_stage]
+            invalid = [
+                asset["title"] for asset in selected if asset["stage"] != expected_stage
+            ]
         if invalid:
             raise HTTPException(
                 status_code=409,
@@ -359,8 +463,12 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         for asset in selected:
             review_stage = body.stage
             if review_stage == "auto":
-                review_stage = "model" if asset["model_review"] == "rejected" else "image"
-            metadata.update(asset["asset_id"], **{f"{review_stage}_review": body.decision})
+                review_stage = (
+                    "model" if asset["model_review"] == "rejected" else "image"
+                )
+            metadata.update(
+                asset["asset_id"], **{f"{review_stage}_review": body.decision}
+            )
             updated.append(_public_asset(find_asset(asset["asset_id"])))
         return {"updated_count": len(updated), "assets": updated}
 
@@ -369,8 +477,12 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         try:
             settings.input_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            LOGGER.error("Unable to prepare input directory %s: %s", settings.input_dir, exc)
-            raise HTTPException(status_code=503, detail="输入文件夹当前不可写，请检查目录权限") from exc
+            LOGGER.error(
+                "Unable to prepare input directory %s: %s", settings.input_dir, exc
+            )
+            raise HTTPException(
+                status_code=503, detail="输入文件夹当前不可写，请检查目录权限"
+            ) from exc
         saved: list[str] = []
         duplicates: list[str] = []
         failed: list[dict[str, str]] = []
@@ -379,7 +491,12 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
             original_name = upload.filename or "未命名图片"
             suffix = Path(upload.filename or "").suffix.lower()
             if suffix not in SUPPORTED_SUFFIXES:
-                failed.append({"name": original_name, "reason": f"不支持的图片格式：{suffix or '未知'}"})
+                failed.append(
+                    {
+                        "name": original_name,
+                        "reason": f"不支持的图片格式：{suffix or '未知'}",
+                    }
+                )
                 continue
             data = await upload.read(20 * 1024 * 1024 + 1)
             if len(data) > 20 * 1024 * 1024:
@@ -387,7 +504,14 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
                 continue
             content_hash = hashlib.sha256(data).hexdigest()
             stem = sanitize_filename(Path(upload.filename or "frame").stem)
-            prepared.append((original_name, f"{stem}__{content_hash[:8]}{suffix}", data, content_hash))
+            prepared.append(
+                (
+                    original_name,
+                    f"{stem}__{content_hash[:8]}{suffix}",
+                    data,
+                    content_hash,
+                )
+            )
 
         # One lock covers duplicate detection and writes so simultaneous browser requests
         # cannot race on the same Windows filename.
@@ -399,7 +523,9 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
                 try:
                     existing_hashes.add(sha256_file(path))
                 except OSError as exc:
-                    LOGGER.warning("Unable to inspect existing upload %s: %s", path, exc)
+                    LOGGER.warning(
+                        "Unable to inspect existing upload %s: %s", path, exc
+                    )
             for original_name, target_name, data, content_hash in prepared:
                 if content_hash in existing_hashes:
                     duplicates.append(original_name)
@@ -409,7 +535,12 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
                     target.write_bytes(data)
                 except OSError as exc:
                     LOGGER.warning("Unable to save upload %s: %s", target, exc)
-                    failed.append({"name": original_name, "reason": "无法写入输入文件夹，请稍后重试"})
+                    failed.append(
+                        {
+                            "name": original_name,
+                            "reason": "无法写入输入文件夹，请稍后重试",
+                        }
+                    )
                     continue
                 saved.append(target.name)
                 existing_hashes.add(content_hash)
@@ -427,13 +558,27 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
     def process_2d(body: ProcessImagesRequest, request: Request) -> dict[str, Any]:
         if local_enabled:
             if body.output_count != 1:
-                raise HTTPException(400, "本地 Qwen 当前生成单张补全图，多视图生成工作流尚未接入")
+                raise HTTPException(
+                    400, "本地 Qwen 当前生成单张补全图，多视图生成工作流尚未接入"
+                )
             selected = [find_asset(aid) for aid in dict.fromkeys(body.asset_ids)]
-            if any(a.get("model_status") == "complete" for a in selected):
-                raise HTTPException(409, "已完成模型的资产不能直接覆盖补图")
+            if any(
+                a.get("model_status") == "complete"
+                or a["stage"] in ("image_generation", "model_generation")
+                for a in selected
+            ):
+                raise HTTPException(
+                    409, "任务正在生成或已有模型，请使用原始素材创建新的补图任务"
+                )
             sources = list(dict.fromkeys(a["source_path"] for a in selected))
             try:
-                return local_engine.submit(sources, "edit", body.prompt, request.state.member)
+                return local_engine.submit(
+                    sources,
+                    "edit",
+                    body.prompt,
+                    request.state.member,
+                    titles={a["source_path"]: a["title"][:80] for a in selected},
+                )
             except (ValueError, OSError) as exc:
                 raise HTTPException(409, str(exc)) from exc
         current_settings = load_settings(config_path)
@@ -445,11 +590,14 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
         invalid = [
             asset["title"]
             for asset in requested
-            if asset["stage"] not in {"source_frame", "awaiting_2d", "image_review", "rejected"}
+            if asset["stage"]
+            not in {"source_frame", "awaiting_2d", "image_review", "rejected"}
             or asset.get("model_status") == "complete"
         ]
         if invalid:
-            raise HTTPException(status_code=409, detail="只能优化尚未进入3D制作的静帧或2D资产")
+            raise HTTPException(
+                status_code=409, detail="只能优化尚未进入3D制作的静帧或2D资产"
+            )
         selected_by_source: dict[str, dict[str, Any]] = {}
         for asset in requested:
             selected_by_source.setdefault(str(asset["source_path"]), asset)
@@ -462,7 +610,9 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
             failures: list[str] = []
             for index, asset in enumerate(selected, start=1):
                 title = str(asset["title"])
-                target_name = str(asset.get("target_name") or asset.get("source_name") or title)
+                target_name = str(
+                    asset.get("target_name") or asset.get("source_name") or title
+                )
                 update(
                     f"正在处理第 {index}/{total} 张：{title}",
                     total=total,
@@ -515,7 +665,9 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
                     f"2D优化完成：成功 {succeeded} 张，失败 {failed} 张。\n"
                     + "\n".join(failures)
                 )
-            view_description = "一张完整主视图" if body.output_count == 1 else "同一物品的三个不同视图"
+            view_description = (
+                "一张完整主视图" if body.output_count == 1 else "同一物品的三个不同视图"
+            )
             return (
                 f"2D优化完成：成功 {succeeded}/{total} 个来源静帧。"
                 f"每个来源生成{view_description}，请进入“2D待审核”查看结果。"
@@ -527,11 +679,16 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
     def generate_3d(body: GenerateRequest, request: Request) -> dict[str, Any]:
         if local_enabled:
             selected = [find_asset(aid) for aid in dict.fromkeys(body.asset_ids)]
-            if any(a["image_review"] != "approved" for a in selected):
+            if any(a["stage"] != "ready_for_3d" for a in selected):
                 raise HTTPException(409, "请先通过图片审核")
             try:
-                return local_engine.submit([a["image_path"] for a in selected], "model", owner=request.state.member,
-                                           originals=[a["source_path"] for a in selected])
+                return local_engine.submit(
+                    [a["image_path"] for a in selected],
+                    "model",
+                    owner=request.state.member,
+                    originals=[a["source_path"] for a in selected],
+                    titles={a["image_path"]: a["title"][:80] for a in selected},
+                )
             except (ValueError, OSError) as exc:
                 raise HTTPException(409, str(exc)) from exc
         current_model_settings = load_hunyuan_settings(config_path)
@@ -581,7 +738,13 @@ def create_app(config_path: Path | str = Path("config.toml")) -> FastAPI:
                 if status == "complete":
                     succeeded += 1
                     messages.append(f"{asset['title']}：生成完成")
-                elif status in {"pending", "retry", "submitting", "submitted", "running"}:
+                elif status in {
+                    "pending",
+                    "retry",
+                    "submitting",
+                    "submitted",
+                    "running",
+                }:
                     succeeded += 1
                     messages.append(f"{asset['title']}：任务已提交，正在服务端处理")
                 else:
@@ -634,7 +797,8 @@ def _configuration_status(config_path: Path) -> dict[str, Any]:
     else:
         hunyuan_configured = bool(values["HUNYUAN_3D_API_KEY"])
     return {
-        "setup_required": not bool(image_settings.api_key) and not local_config(root).get("enabled", False),
+        "setup_required": not bool(image_settings.api_key)
+        and not local_config(root).get("enabled", False),
         "local_enabled": local_config(root).get("enabled", False),
         "ark": {
             "configured": bool(image_settings.api_key),
@@ -661,7 +825,14 @@ def _public_asset(asset: dict[str, Any]) -> dict[str, Any]:
     result = {
         key: value
         for key, value in asset.items()
-        if key not in {"source_path", "image_path", "preview_path", "model_path"}
+        if key
+        not in {
+            "source_path",
+            "image_path",
+            "preview_path",
+            "model_path",
+            "source_paths",
+        }
     }
     asset_id = str(asset["asset_id"])
     result.update(
@@ -669,10 +840,14 @@ def _public_asset(asset: dict[str, Any]) -> dict[str, Any]:
             "source_url": f"/api/assets/{asset_id}/files/source",
             "image_url": f"/api/assets/{asset_id}/files/image",
             "preview_url": (
-                f"/api/assets/{asset_id}/files/preview" if asset.get("preview_path") else None
+                f"/api/assets/{asset_id}/files/preview"
+                if asset.get("preview_path")
+                else None
             ),
             "model_url": (
-                f"/api/assets/{asset_id}/files/model" if asset.get("model_path") else None
+                f"/api/assets/{asset_id}/files/model"
+                if asset.get("model_path")
+                else None
             ),
         }
     )
@@ -710,7 +885,10 @@ def _describe_2d_failure(manifest_path: Path, source_path: Path, fallback: str) 
     matching: list[dict[str, Any]] = []
     for row in load_manifest(manifest_path):
         try:
-            same_source = Path(str(row.get("source_path") or "")).resolve() == source_path.resolve()
+            same_source = (
+                Path(str(row.get("source_path") or "")).resolve()
+                == source_path.resolve()
+            )
         except OSError:
             same_source = False
         if same_source and str(row.get("status")) == "failed":
@@ -748,13 +926,13 @@ def _targeted_prompt(
         f"系统根据上传文件名或资产名称自动得到目标字段：“{target}”。"
         f"本次唯一目标资产是“{target}”。只定位、提取并补全输入图中的“{target}”本体，"
         "即使它在画面中占比较小，也不得改选展示盒、容器、人物、服装、武器或其他物品；"
-        f"{view_instruction}\n"
-        + base_prompt
-        + f"\n[workflow_batch:{batch_token}]"
+        f"{view_instruction}\n" + base_prompt + f"\n[workflow_batch:{batch_token}]"
     )
 
 
-def _matching_failed_task(manifest_path: Path, source_path: Path, profile: str) -> str | None:
+def _matching_failed_task(
+    manifest_path: Path, source_path: Path, profile: str
+) -> str | None:
     row = _matching_model_task(manifest_path, source_path, profile, status="failed")
     return str((row or {}).get("task_id") or "") or None
 
@@ -771,7 +949,10 @@ def _matching_model_task(
     matching: list[dict[str, Any]] = []
     for row in load_manifest(manifest_path):
         try:
-            same_source = Path(str(row.get("source_path") or "")).resolve() == source_path.resolve()
+            same_source = (
+                Path(str(row.get("source_path") or "")).resolve()
+                == source_path.resolve()
+            )
         except OSError:
             same_source = False
         if (
@@ -788,7 +969,11 @@ def _matching_model_task(
 
 def _describe_3d_failure(row: dict[str, Any] | None, fallback: str) -> str:
     if not row:
-        concise = fallback.strip()[:600] if fallback.strip() else "未找到本项3D任务记录，请查看本地服务日志。"
+        concise = (
+            fallback.strip()[:600]
+            if fallback.strip()
+            else "未找到本项3D任务记录，请查看本地服务日志。"
+        )
         return concise
     code = str(row.get("error_code") or "3D接口错误")
     request_id = str(row.get("request_id") or "")
@@ -802,7 +987,10 @@ def _describe_3d_failure(row: dict[str, Any] | None, fallback: str) -> str:
         "UnauthorizedOperation": "当前密钥没有调用混元3D服务的权限，请检查账号授权。",
         "RequestLimitExceeded": "接口请求频率已超限，请稍后重试或降低批量并发。",
     }
-    detail = known.get(code) or str(row.get("error_message") or fallback or "接口调用失败")[:600]
+    detail = (
+        known.get(code)
+        or str(row.get("error_message") or fallback or "接口调用失败")[:600]
+    )
     return f"{code}：{detail}" + (f" 请求ID：{request_id}" if request_id else "")
 
 

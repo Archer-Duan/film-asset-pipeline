@@ -15,40 +15,9 @@ from pathlib import Path
 from .comfy import ComfyClient, compile_workflow, validate_models
 from .pipeline import atomic_write, sha256_file
 from .state import utc_now
+from .asset_files import task_prefix, result_relative_path
 
-PROFILES = {
-    "edit": {
-        "label": "补全优化图片",
-        "file": "qwen.json",
-        "image": 10203,
-        "prompt": 10204,
-        "targets": [10205],
-        "outputs": {"10205": "image"},
-    },
-    "model": {
-        "label": "单图生成模型",
-        "file": "single.json",
-        "image": 343,
-        "targets": [272],
-        "outputs": {"272": "model"},
-    },
-    "full": {
-        "label": "补图并生成模型",
-        "file": "qwen.json",
-        "image": 10203,
-        "prompt": 10204,
-        "targets": [10205, 272],
-        "outputs": {"10205": "image", "272": "model"},
-    },
-    "multiview": {
-        "label": "四视图拼图生成模型",
-        "file": "multiview.json",
-        "image": 364,
-        "targets": [372],
-        "outputs": {"372": "model"},
-        "experimental": True,
-    },
-}
+from .workflow_library import WorkflowLibrary, parameter_values
 
 
 def local_config(root):
@@ -66,6 +35,7 @@ class LocalEngine:
         self.client = client or ComfyClient(
             self.config.get("url", "http://127.0.0.1:8188")
         )
+        self.library = WorkflowLibrary(root)
         self.stop = threading.Event()
         self.thread = None
         with self.db() as db:
@@ -76,6 +46,19 @@ class LocalEngine:
                 profile TEXT NOT NULL, status TEXT NOT NULL, remote_id TEXT,
                 image TEXT, model TEXT, message TEXT NOT NULL DEFAULT '',
                 created TEXT NOT NULL, updated TEXT NOT NULL)""")
+            columns = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+            for name in ("input_files", "parameters", "artifacts", "title"):
+                if name not in columns:
+                    try:
+                        db.execute(
+                            f"ALTER TABLE tasks ADD COLUMN {name} TEXT NOT NULL DEFAULT '{{}}'"
+                        )
+                    except sqlite3.OperationalError:
+                        if name not in {
+                            r[1] for r in db.execute("PRAGMA table_info(tasks)")
+                        }:
+                            raise
+            db.execute("UPDATE tasks SET title='' WHERE title='{}'")
             db.execute("CREATE INDEX IF NOT EXISTS tasks_identity ON tasks(identity)")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS batches(batch TEXT,task TEXT,PRIMARY KEY(batch,task))"
@@ -92,14 +75,8 @@ class LocalEngine:
         finally:
             db.close()
 
-    def profile(self, kind):
-        if kind not in PROFILES:
-            raise ValueError("未知工作流")
-        profile = {**PROFILES[kind], **self.config.get("profiles", {}).get(kind, {})}
-        path = Path(profile["file"])
-        if not path.is_absolute():
-            path = Path(__file__).with_name("workflows") / path
-        return profile, json.loads(path.read_text("utf-8"))
+    def profile(self, kind, version=None):
+        return self.library.load(kind, version, self.config)
 
     def prepare(
         self,
@@ -109,16 +86,64 @@ class LocalEngine:
         prefix="workbench/preflight",
         workflow=None,
         profile=None,
+        parameters=None,
     ):
         if profile is None:
             profile, workflow = self.profile(kind)
-        overrides = {(profile["image"], "image"): image}
-        if prompt and profile.get("prompt"):
-            overrides[(profile["prompt"], "prompt")] = prompt
-        for nid, role in profile["outputs"].items():
-            overrides[(int(nid), "filename_prefix")] = f"{prefix}/{role}"
+        # In-flight v1.0 tasks retain their original frozen profile.
+        if "inputs" not in profile:
+            overrides = {(profile["image"], "image"): image}
+            if prompt and profile.get("prompt"):
+                overrides[(profile["prompt"], "prompt")] = prompt
+        else:
+            supplied = dict(parameters or {})
+            if prompt and any(f["key"] == "prompt" for f in profile["parameters"]):
+                supplied["prompt"] = prompt
+            values = parameter_values(profile, supplied)
+            images = (
+                image
+                if isinstance(image, dict)
+                else {f["key"]: image for f in profile["inputs"]}
+            )
+            ui = "nodes" in workflow
+
+            def nid(value):
+                return int(value) if ui else str(value)
+
+            overrides = {
+                (nid(f["node"]), f["input"]): images[f["key"]]
+                for f in profile["inputs"]
+            }
+            for f in profile["parameters"]:
+                if f["key"] in values and not (
+                    f.get("omit_empty") and values[f["key"]] == ""
+                ):
+                    overrides[(nid(f["node"]), f["input"])] = values[f["key"]]
+        for node, role in profile["outputs"].items():
+            overrides[
+                (int(node) if "nodes" in workflow else str(node), "filename_prefix")
+            ] = f"{prefix.get(role) if isinstance(prefix, dict) else prefix}__{node}-{role}"
         schema = self.client.request("/object_info")
         graph = compile_workflow(workflow, schema, profile["targets"], overrides)
+        # Intermediate image-saving nodes also need the task/date prefix.
+        if isinstance(prefix, dict):
+            for node_id, node in graph.items():
+                if "filename_prefix" in node["inputs"]:
+                    role = profile["outputs"].get(node_id, "image")
+                    raw = (
+                        str(node["inputs"]["filename_prefix"])
+                        .replace("\\", "/")
+                        .rsplit("/", 1)[-1]
+                    )
+                    label = {
+                        "front_view": "正面",
+                        "left_view": "左侧",
+                        "back_view": "背面",
+                        "right_view": "右侧",
+                    }.get(raw, "模型" if role == "model" else "图片")
+                    node["inputs"]["filename_prefix"] = (
+                        f"{prefix[role]}__{label}-{node_id}"
+                    )
         errors = validate_models(graph, schema)
         if errors:
             raise ValueError("；".join(errors))
@@ -126,78 +151,161 @@ class LocalEngine:
 
     def health(self):
         profiles = []
-        for kind, base in PROFILES.items():
+        for entry in self.library.entries():
             try:
-                self.prepare(kind)
+                profile, workflow = self.profile(entry["id"], entry["version"])
+                self.prepare(entry["id"], profile=profile, workflow=workflow)
                 ready, message = True, "节点和模型配置就绪，尚未代表生成质量验收"
             except Exception as exc:
+                profile = entry
                 ready, message = False, str(exc)[:500]
             profiles.append(
                 {
-                    "id": kind,
-                    "label": base["label"],
-                    "ready": ready,
-                    "message": message,
-                    "experimental": base.get("experimental", False),
+                    k: profile.get(k)
+                    for k in (
+                        "id",
+                        "version",
+                        "label",
+                        "description",
+                        "inputs",
+                        "parameters",
+                        "outputs",
+                        "builtin",
+                        "enabled",
+                    )
                 }
+                | {"ready": ready, "message": message}
             )
         return {"enabled": self.config.get("enabled", False), "profiles": profiles}
 
-    def submit(self, sources, kind, prompt="", owner="local", originals=None):
-        if not sources or len(sources) > 50:
-            raise ValueError("每批需要 1–50 张图片")
-        if kind == "multiview":
-            raise ValueError(
-                "多视图已预留：请先配置模型及四视图裁剪区域，当前不开放提交"
-            )
-        profile, workflow = self.profile(kind)
-        self.prepare(kind, prompt=prompt, profile=profile, workflow=workflow)
-        batch = uuid.uuid4().hex
-        now = utc_now()
-        for index, source in enumerate(sources):
-            source = Path(source).resolve()
-            if not source.is_file():
-                raise ValueError("输入图片不存在")
-            original = (
-                str(Path(originals[index]).resolve()) if originals else str(source)
-            )
-            identity = hashlib.sha256(
-                json.dumps(
-                    [sha256_file(source), kind, prompt, workflow, profile],
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            with self.db() as db:
+    def enable_workflow(self, kind, version, enabled):
+        profile, workflow = self.profile(kind, version)
+        if enabled:
+            self.prepare(kind, profile=profile, workflow=workflow)
+        self.library.set_enabled(kind, version, enabled)
+
+    def submit(
+        self,
+        sources,
+        kind,
+        prompt="",
+        owner="local",
+        originals=None,
+        *,
+        input_sets=None,
+        parameters=None,
+        version=None,
+        title="",
+        titles=None,
+    ):
+        if not isinstance(title, str) or len(title) > 80:
+            raise ValueError("资产名称最多 80 字符")
+        title = title.strip()
+        titles = titles or {}
+        if any(not isinstance(v, str) or len(v) > 80 for v in titles.values()):
+            raise ValueError("资产名称最多 80 字符")
+        profile, workflow = self.profile(kind, version)
+        if not profile.get("enabled"):
+            raise ValueError("该工作流版本未启用")
+        fields = profile["inputs"]
+        if input_sets is None:
+            if len(fields) != 1:
+                raise ValueError(
+                    "该工作流需要按名称提供多张视图，不能把每张图作为独立任务"
+                )
+            input_sets = [{fields[0]["key"]: source} for source in sources]
+        if not input_sets or len(input_sets) > 50:
+            raise ValueError("每批需要 1–50 项任务")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise ValueError("参数需要 JSON 对象")
+        supplied = dict(parameters or {})
+        if prompt:
+            if not any(f["key"] == "prompt" for f in profile["parameters"]):
+                raise ValueError("该工作流不支持提示词")
+            supplied["prompt"] = prompt
+        values = parameter_values(profile, supplied)
+        prepared = []
+        from PIL import Image
+
+        for mapping in input_sets:
+            if set(mapping) != {f["key"] for f in fields}:
+                raise ValueError("图片输入不完整或包含未声明的视图")
+            files = {f["key"]: str(Path(mapping[f["key"]]).resolve()) for f in fields}
+            for source in files.values():
+                path = Path(source)
+                if not path.is_file() or path.stat().st_size > 20 * 1024 * 1024:
+                    raise ValueError("输入图片不存在或超过 20MB")
+                with Image.open(path) as im:
+                    if (
+                        im.format not in ("PNG", "JPEG", "WEBP")
+                        or im.width * im.height > 40_000_000
+                    ):
+                        raise ValueError("需要 JPG、PNG 或 WebP，最多 4000 万像素")
+                    im.verify()
+            prepared.append(files)
+        self.prepare(
+            kind, prompt=prompt, profile=profile, workflow=workflow, parameters=values
+        )
+        batch, now = uuid.uuid4().hex, utc_now()
+        # Entire batch is atomic; a bad later image cannot leave earlier jobs queued.
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for index, files in enumerate(prepared):
+                source = files[fields[0]["key"]]
+                original = (
+                    str(Path(originals[index]).resolve()) if originals else source
+                )
+                identity = hashlib.sha256(
+                    json.dumps(
+                        [
+                            {
+                                key: sha256_file(Path(path))
+                                for key, path in files.items()
+                            },
+                            kind,
+                            values,
+                            workflow,
+                            profile,
+                        ],
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
                 existing = db.execute(
-                    "SELECT * FROM tasks WHERE identity=? AND owner=? AND status NOT IN ('failed','interrupted') ORDER BY created DESC LIMIT 1",
+                    "SELECT id FROM tasks WHERE identity=? AND owner=? AND status NOT IN ('failed','interrupted') ORDER BY created DESC LIMIT 1",
                     (identity, owner),
                 ).fetchone()
                 if existing:
+                    task_id = existing["id"]
+                else:
+                    task_id = uuid.uuid4().hex
                     db.execute(
-                        "INSERT OR IGNORE INTO batches VALUES(?,?)",
-                        (batch, existing["id"]),
+                        "INSERT INTO tasks(id,batch,identity,owner,kind,source,original,prompt,workflow,profile,status,created,updated,input_files,parameters) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            task_id,
+                            batch,
+                            identity,
+                            owner,
+                            kind,
+                            source,
+                            original,
+                            str(values.get("prompt", prompt)),
+                            json.dumps(workflow),
+                            json.dumps(profile),
+                            "queued",
+                            now,
+                            now,
+                            json.dumps(files),
+                            json.dumps(values),
+                        ),
                     )
-                    continue
-                task_id = uuid.uuid4().hex
                 db.execute(
-                    "INSERT INTO tasks(id,batch,identity,owner,kind,source,original,prompt,workflow,profile,status,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        task_id,
-                        batch,
-                        identity,
-                        owner,
-                        kind,
-                        str(source),
-                        original,
-                        prompt,
-                        json.dumps(workflow),
-                        json.dumps(profile),
-                        "queued",
-                        now,
-                        now,
-                    ),
+                    "INSERT OR IGNORE INTO batches VALUES(?,?)", (batch, task_id)
                 )
-                db.execute("INSERT INTO batches VALUES(?,?)", (batch, task_id))
+                if not existing:
+                    db.execute(
+                        "UPDATE tasks SET title=? WHERE id=?",
+                        (titles.get(source, title).strip(), task_id),
+                    )
         return self.group(batch)
 
     def rows(self):
@@ -244,7 +352,9 @@ class LocalEngine:
         )
         return {
             "job_id": batch,
-            "kind": "process-2d" if rows[0]["kind"] == "edit" else "local-3d",
+            "kind": "process-2d"
+            if "model" not in json.loads(rows[0]["profile"])["outputs"].values()
+            else "local-3d",
             "status": status,
             "message": active["message"] or f"排队中，共 {len(rows)} 项",
             "progress": {
@@ -273,7 +383,19 @@ class LocalEngine:
                 )
             }
             | {
-                "name": Path(r["source"]).name,
+                "name": r["title"] or Path(r["source"]).stem.split("__", 1)[0],
+                "title": r["title"],
+                "label": json.loads(r["profile"]).get("label", r["kind"]),
+                "version": json.loads(r["profile"]).get("version", "1.0.0"),
+                "inputs": [
+                    {"key": f["key"], "label": f["label"]}
+                    for f in json.loads(r["profile"]).get("inputs", [])
+                ],
+                "parameters": json.loads(r["parameters"]),
+                "artifacts": [
+                    {k: a[k] for k in ("id", "role", "name")}
+                    for a in json.loads(r["artifacts"]).values()
+                ],
                 "has_image": bool(r["image"]),
                 "has_model": bool(r["model"]),
             }
@@ -361,7 +483,12 @@ class LocalEngine:
         if (
             not task["remote_id"]
             and task["status"] == "queued"
-            and not Path(task["source"]).is_file()
+            and not all(
+                Path(p).is_file()
+                for p in (
+                    json.loads(task["input_files"]) or {"image": task["source"]}
+                ).values()
+            )
         ):
             self.update(tid, status="failed", message="输入图片已不存在，请重新上传")
             return
@@ -403,14 +530,23 @@ class LocalEngine:
                 if queue.get("queue_running") or queue.get("queue_pending"):
                     self.update(tid, message="等待 ComfyUI 当前任务完成")
                     return
-                image = self.client.upload(Path(task["source"]))
+                input_files = json.loads(task["input_files"])
+                image = (
+                    {
+                        key: self.client.upload(Path(path))
+                        for key, path in input_files.items()
+                    }
+                    if input_files
+                    else self.client.upload(Path(task["source"]))
+                )
                 graph = self.prepare(
                     task["kind"],
                     image,
                     task["prompt"],
-                    f"workbench/{tid}",
+                    {role: task_prefix(task, role) for role in ("image", "model")},
                     json.loads(task["workflow"]),
                     json.loads(task["profile"]),
+                    parameters=json.loads(task["parameters"]),
                 )
                 self.update(tid, status="submitting", message="正在提交到本地 ComfyUI")
                 response = self.client.request(
@@ -475,7 +611,7 @@ class LocalEngine:
                 self.update(
                     tid,
                     status="running" if running else "submitted",
-                    message="本地 GPU 计算中：" + PROFILES[task["kind"]]["label"]
+                    message="本地 GPU 计算中：" + json.loads(task["profile"])["label"]
                     if running
                     else "ComfyUI 排队中",
                 )
@@ -496,7 +632,7 @@ class LocalEngine:
 
     def collect(self, task, outputs):
         profile = json.loads(task["profile"])
-        values = {}
+        values, artifacts = {}, {}
 
         def files(value):
             if isinstance(value, dict):
@@ -509,80 +645,203 @@ class LocalEngine:
                     yield from files(child)
 
         for node, role in profile["outputs"].items():
-            candidates = list(files(outputs.get(node, {})))
             suffixes = (
                 (".glb",) if role == "model" else (".png", ".jpg", ".jpeg", ".webp")
             )
-            file = next(
-                (
-                    f
-                    for f in candidates
-                    if str(f["filename"]).lower().endswith(suffixes)
-                ),
-                None,
-            )
-            if not file:
-                raise ValueError(f"工作流完成但缺少 {role} 输出")
-            data = self.client.download(file)
-            if role == "model":
+            candidates = []
+            seen = set()
+            for file in files(outputs.get(node, {})):
+                identity = (
+                    file.get("filename"),
+                    file.get("subfolder"),
+                    file.get("type"),
+                )
                 if (
-                    len(data) < 20
-                    or data[:4] != b"glTF"
-                    or struct.unpack_from("<II", data, 4) != (2, len(data))
+                    str(file["filename"]).lower().endswith(suffixes)
+                    and identity not in seen
                 ):
-                    raise ValueError("模型不是有效 GLB 2.0 文件")
-            else:
-                from PIL import Image
-                from io import BytesIO
+                    seen.add(identity)
+                    candidates.append(file)
+            if not candidates:
+                raise ValueError(f"工作流完成但缺少 {role} 输出")
+            for index, file in enumerate(candidates):
+                data = self.client.download(file)
+                if role == "model":
+                    if (
+                        len(data) < 20
+                        or data[:4] != b"glTF"
+                        or struct.unpack_from("<II", data, 4) != (2, len(data))
+                    ):
+                        raise ValueError("模型不是有效 GLB 2.0 文件")
+                else:
+                    from PIL import Image
+                    from io import BytesIO
 
-                with Image.open(BytesIO(data)) as im:
-                    im.verify()
-            path = (
-                self.folder
-                / task["id"]
-                / (role + Path(file["filename"]).suffix.lower())
-            )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(path, data)
-            values[role] = str(path)
+                    with Image.open(BytesIO(data)) as im:
+                        im.verify()
+                artifact_id = f"a{len(artifacts)}"
+                relative = result_relative_path(
+                    task, role, len(artifacts), Path(file["filename"]).suffix
+                )
+                name = relative.name
+                path = self.folder / "results" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(path, data)
+                artifacts[artifact_id] = {
+                    "id": artifact_id,
+                    "role": role,
+                    "name": name,
+                    "path": str(path),
+                }
+                values.setdefault(role, str(path))
         self.update(
             task["id"],
             **values,
+            artifacts=json.dumps(artifacts),
             status="complete",
             message="生成完成，结果已归档，可审核和下载",
         )
 
+    def source_rows(self):
+        results = []
+        rows = self.rows()
+        generated = {
+            a["path"]
+            for r in rows
+            for a in json.loads(r["artifacts"]).values()
+            if a["role"] == "image"
+        } | {r["image"] for r in rows if r["image"]}
+        for row in rows:
+            profile = json.loads(row["profile"])
+            files = json.loads(row["input_files"]) or {"image": row["source"]}
+            labels = {f["key"]: f["label"] for f in profile.get("inputs", [])}
+            has_result = bool(row["image"] or row["model"])
+            state = (
+                "processed"
+                if has_result
+                else "failed"
+                if row["status"] in ("failed", "interrupted", "attention")
+                else "processing"
+            )
+            # A model-only task consumes an existing image, it does not run image generation.
+            if (
+                "model" in profile["outputs"].values()
+                and "image" not in profile["outputs"].values()
+                and state == "processing"
+            ):
+                state = "processed"
+            paths = dict(files)
+            if row["original"] not in paths.values():
+                paths["original"] = row["original"]
+            for key, path in paths.items():
+                if path in generated:
+                    continue
+                results.append(
+                    {
+                        "path": path,
+                        "title": (
+                            row["title"]
+                            + (
+                                " · " + labels.get(key, "原图")
+                                if len(files) > 1
+                                else ""
+                            )
+                        )
+                        if row["title"]
+                        else "",
+                        "status": state,
+                        "task_id": row["id"],
+                        "message": row["message"],
+                        "updated_at": row["updated"],
+                        "processed": has_result or state == "processed",
+                    }
+                )
+        return results
+
     def manifest_rows(self):
         images, models = [], []
         for row in self.rows():
-            image = row["image"] or row["source"]
-            if not Path(image).is_file():
-                continue
-            if row["kind"] != "edit" or row["image"]:
+            profile = json.loads(row["profile"])
+            has_model = "model" in profile["outputs"].values()
+            artifacts = list(json.loads(row["artifacts"]).values())
+            image_files = [a["path"] for a in artifacts if a["role"] == "image"] or (
+                [row["image"]] if row["image"] else []
+            )
+            if has_model and not image_files:
+                image_files = [row["source"]]
+            for index, image in enumerate(dict.fromkeys(image_files)):
+                if not Path(image).is_file():
+                    continue
                 images.append(
                     {
                         "status": "complete",
                         "task_id": row["id"],
                         "source_path": row["original"],
+                        "source_paths": list(
+                            dict.fromkeys(
+                                [
+                                    row["original"],
+                                    *(json.loads(row["input_files"]) or {}).values(),
+                                ]
+                            )
+                        ),
                         "output_path": image,
                         "output_sha256": sha256_file(Path(image)),
-                        "model": "Qwen 本地" if row["image"] else "参考图",
-                        "result_index": 1,
+                        "model": profile.get("label", "本地工作流")
+                        if row["image"]
+                        else "参考图",
+                        "title": row["title"],
+                        "result_index": index + 1,
                         "updated_at": row["created"],
+                        "keep_history": True,
                     }
                 )
-            if row["kind"] != "edit":
+            first_image_row = next(
+                (r for r in images if r["task_id"] == row["id"]), None
+            )
+            if has_model and image_files and Path(image_files[0]).is_file():
                 models.append(
                     {
                         "task_id": row["id"],
-                        "source_path": image,
+                        "source_path": image_files[0],
                         "status": "complete"
                         if row["model"]
-                        else "running"
-                        if row["status"] not in ("failed", "interrupted", "attention")
-                        else "failed",
+                        else "failed"
+                        if row["status"] in ("failed", "interrupted", "attention")
+                        else "running",
+                        "error_message": row["message"],
                         "output_path": row["model"],
-                        "model": "Pixal3D 本地",
+                        "model": profile.get("label", "本地工作流"),
+                        "updated_at": row["updated"],
+                    }
+                )
+            extra_models = [
+                a
+                for a in artifacts
+                if a["role"] == "model"
+                and a["path"] != row["model"]
+                and Path(a["path"]).is_file()
+            ]
+            for index, artifact in enumerate(extra_models, start=2):
+                if first_image_row is None:
+                    continue
+                images.append(
+                    first_image_row
+                    | {
+                        "output_sha256": hashlib.sha256(
+                            f"{first_image_row['output_sha256']}:{row['id']}:{artifact['id']}".encode()
+                        ).hexdigest(),
+                        "model_artifact_id": artifact["id"],
+                        "title": f"{row['title'] or Path(row['source']).stem.split('__', 1)[0]} · 模型 {index}",
+                    }
+                )
+                models.append(
+                    {
+                        "task_id": row["id"],
+                        "artifact_id": artifact["id"],
+                        "source_path": first_image_row["output_path"],
+                        "status": "complete",
+                        "output_path": artifact["path"],
                         "updated_at": row["updated"],
                     }
                 )

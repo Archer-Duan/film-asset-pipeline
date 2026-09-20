@@ -1,0 +1,135 @@
+[
+  {
+    "id": "edit",
+    "version": "1.1.0",
+    "label": "补全优化图片",
+    "description": "提取主体并补全缺失细节，生成图片后可进入审核。",
+    "file": "qwen.json",
+    "inputs": [
+      {
+        "key": "image",
+        "label": "参考图片",
+        "node": 10203,
+        "input": "image",
+        "type": "image"
+      }
+    ],
+    "parameters": [
+      {
+        "key": "prompt",
+        "label": "资产提示词",
+        "node": 10204,
+        "input": "prompt",
+        "type": "text",
+        "default": "",
+        "omit_empty": true
+      }
+    ],
+    "outputs": {
+      "10205": "image"
+    }
+  },
+  {
+    "id": "model",
+    "version": "1.1.0",
+    "label": "单图生成模型",
+    "description": "使用一张完整参考图生成带纹理的 GLB 模型。",
+    "file": "single.json",
+    "inputs": [
+      {
+        "key": "image",
+        "label": "参考图片",
+        "node": 343,
+        "input": "image",
+        "type": "image"
+      }
+    ],
+    "parameters": [],
+    "outputs": {
+      "272": "model"
+    }
+  },
+  {
+    "id": "full",
+    "version": "1.1.0",
+    "label": "补图并生成模型",
+    "description": "原图经过 Qwen 补全，再由 Pixal3D 生成模型。",
+    "file": "qwen.json",
+    "inputs": [
+      {
+        "key": "image",
+        "label": "参考图片",
+        "node": 10203,
+        "input": "image",
+        "type": "image"
+      }
+    ],
+    "parameters": [
+      {
+        "key": "prompt",
+        "label": "资产提示词",
+        "node": 10204,
+        "input": "prompt",
+        "type": "text",
+        "default": "",
+        "omit_empty": true
+      }
+    ],
+    "outputs": {
+      "10205": "image",
+      "272": "model"
+    }
+  },
+  {
+    "id": "multiview",
+    "version": "1.1.0",
+    "label": "四视图生成模型",
+    "description": "分别上传同一物体的前、左、后、右视图。保持一致的姿态与比例，避免四张图互相矛盾。",
+    "file": "multiview-inputs.json",
+    "inputs": [
+      {
+        "key": "front",
+        "label": "正面",
+        "node": 338,
+        "input": "image",
+        "type": "image"
+      },
+      {
+        "key": "left",
+        "label": "左侧",
+        "node": 341,
+        "input": "image",
+        "type": "image"
+      },
+      {
+        "key": "back",
+        "label": "背面",
+        "node": 342,
+        "input": "image",
+        "type": "image"
+      },
+      {
+        "key": "right",
+        "label": "右侧",
+        "node": 345,
+        "input": "image",
+        "type": "image"
+      }
+    ],
+    "parameters": [
+      {
+        "key": "fov",
+        "label": "水平视场角（度）",
+        "type": "number",
+        "node": 324,
+        "input": "fov",
+        "default": 20,
+        "min": 1,
+        "max": 170
+      }
+    ],
+    "outputs": {
+      "372": "model"
+    }
+  }
+]

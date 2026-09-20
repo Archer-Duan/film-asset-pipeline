@@ -1,6 +1,7 @@
 const state = {
   workspace: { summary: {}, assets: [], profiles: {} },
   stage: "all",
+  taskFilter: new URLSearchParams(location.search).get("task"),
   search: "",
   sort: localStorage.getItem("filmAssetSort") || "generated_desc",
   viewMode: localStorage.getItem("filmAssetViewMode") || "grid",
@@ -15,25 +16,29 @@ const FRONTEND_VERSION = document.querySelector('meta[name="app-version"]')?.con
 
 const stageLabels = {
   all: "全部资产",
-  source_frames: "来源静帧",
-  awaiting_2d: "待处理静帧",
-  image_review: "2D 待审核",
-  ready_for_3d: "待生成 3D",
-  model_generation: "3D 生成中",
-  model_review: "3D 待审核",
-  approved: "审核通过",
-  rejected: "已驳回",
+  source_frames: "原始素材",
+  image_generation: "图片生成中",
+  generation_failed: "生成失败",
+  awaiting_2d: "待处理图片",
+  image_review: "图片待审核",
+  ready_for_3d: "待生成模型",
+  model_generation: "模型生成中",
+  model_review: "模型待审核",
+  approved: "已通过模型",
+  rejected: "审核未通过",
 };
 
 const statusLabels = {
-  source_frame: "已有2D",
+  source_frame: "已处理素材",
+  image_generation: "图片生成中",
+  generation_failed: "生成失败",
   awaiting_2d: "待处理",
-  image_review: "2D待审",
+  image_review: "图片待审",
   ready_for_3d: "待生成",
   model_generation: "生成中",
-  model_review: "3D待审",
+  model_review: "模型待审",
   approved: "已通过",
-  rejected: "已驳回",
+  rejected: "审核未通过",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -48,7 +53,11 @@ async function api(url, options = {}) {
 }
 
 async function loadWorkspace() {
-  state.workspace = await api("/api/workspace");
+  const workspace = await api("/api/workspace");
+  const signature = JSON.stringify(workspace);
+  if (signature === state.workspaceSignature) return;
+  state.workspaceSignature = signature;
+  state.workspace = workspace;
   if (state.workspace.configuration?.local_enabled) {
     $("#image-output-count").value = "1";
     $("#image-output-count").disabled = true;
@@ -87,7 +96,7 @@ function renderConfigurationStatus() {
 function renderMetrics() {
   const s = state.workspace.summary;
   const generated = (s.model_review || 0) + (s.approved || 0);
-  const pending = (s.awaiting_2d || 0) + (s.image_review || 0) + (s.ready_for_3d || 0) + (s.model_generation || 0);
+  const pending = (s.image_generation || 0) + (s.generation_failed || 0) + (s.awaiting_2d || 0) + (s.image_review || 0) + (s.ready_for_3d || 0) + (s.model_generation || 0);
   $("#metric-total").textContent = s.total || 0;
   $("#metric-pending").textContent = pending;
   $("#metric-models").textContent = generated;
@@ -101,18 +110,20 @@ function renderMetrics() {
   $("#nav-model-review").textContent = s.model_review || 0;
   $("#nav-approved").textContent = s.approved || 0;
   $("#nav-rejected").textContent = s.rejected || 0;
+  $("#nav-image-generation").textContent = s.image_generation || 0;
+  $("#nav-generation-failed").textContent = s.generation_failed || 0;
 }
 
 function visibleAssets() {
   const needle = state.search.trim().toLowerCase();
   const assets = state.workspace.assets.filter((asset) => {
     const stageMatch = state.stage === "all"
-      ? asset.stage !== "source_frame"
+      ? true
       : state.stage === "source_frames"
-      ? ["source_frame", "awaiting_2d"].includes(asset.stage)
+      ? Boolean(asset.is_source)
       : asset.stage === state.stage;
     const haystack = [asset.title, asset.asset_id, ...(asset.tags || [])].join(" ").toLowerCase();
-    return stageMatch && (!needle || haystack.includes(needle));
+    return stageMatch && (!state.taskFilter || (asset.task_ids || []).includes(state.taskFilter)) && (!needle || haystack.includes(needle));
   });
   const direction = state.sort.endsWith("_desc") ? -1 : 1;
   const field = state.sort.startsWith("title_") ? "title" : "generated_at";
@@ -126,7 +137,7 @@ function visibleAssets() {
 function renderAssets() {
   const assets = visibleAssets();
   $("#view-title").textContent = stageLabels[state.stage] || "全部资产";
-  $("#view-caption").textContent = `${assets.length} 项资产 · 从静帧、设计图到 GLB 的可追溯映射`;
+  $("#view-caption").textContent = `${assets.length} 项资产 · ${state.taskFilter ? "当前任务的关联资产，点击左侧阶段可查看全部" : "原始素材、处理图片与模型可相互追溯"}`;
   const container = $("#asset-grid");
   container.className = `asset-grid view-${state.viewMode} thumb-${state.thumbnailSize}`;
   container.innerHTML = assets.map((asset) => state.viewMode === "list" ? assetListRow(asset) : assetCard(asset)).join("");
@@ -139,14 +150,14 @@ function renderAssets() {
 
 function assetCard(asset) {
   const selected = state.selected.has(asset.asset_id);
-  const sourceFrame = ["source_frame", "awaiting_2d"].includes(asset.stage);
+  const sourceFrame = Boolean(asset.is_source);
   const awaiting2D = asset.stage === "awaiting_2d";
   const modelDone = asset.model_status === "complete";
   const tags = (asset.tags || []).length ? asset.tags : ["待补充标签"];
   const spec = modelDone
-    ? `${asset.enable_pbr ? "PBR" : "普通材质"} · ${formatFaces(asset.face_count)}`
+    ? `${asset.face_count ? `${asset.enable_pbr ? "PBR" : "普通材质"} · ${formatFaces(asset.face_count)}` : "模型已生成"}`
     : asset.stage === "source_frame"
-    ? "已有2D结果 · 可重新优化"
+    ? "素材已有生成结果"
     : asset.image_error_code
     ? `上次失败 · ${friendlyErrorCode(asset.image_error_code)}`
     : "尚未生成模型";
@@ -162,7 +173,7 @@ function assetCard(asset) {
           <span class="status status-${asset.stage}">${statusLabels[asset.stage] || "状态未知"}</span>
         </div>
         <div class="pipeline-line" aria-label="处理进度">
-          <span class="done">静帧</span><i></i><span class="${awaiting2D ? "" : "done"}">2D</span><i></i><span class="${modelDone ? "done" : ""}">3D</span>
+          <span class="done">素材</span><i></i><span class="${awaiting2D ? "" : "done"}">图片</span><i></i><span class="${modelDone ? "done" : ""}">模型</span>
         </div>
         <div class="tag-list">${tags.slice(0, 4).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
         <div class="card-foot"><span>${spec}</span>${asset.model_url ? `<a href="${asset.model_url}">下载 GLB</a>` : "<span>—</span>"}</div>
@@ -175,7 +186,7 @@ function assetListRow(asset) {
   const tags = (asset.tags || []).join(", ");
   const preview = asset.preview_url || asset.image_url;
   const details = asset.model_status === "complete"
-    ? `${asset.enable_pbr ? "PBR" : "普通材质"} · ${formatFaces(asset.face_count)}`
+    ? `${asset.face_count ? `${asset.enable_pbr ? "PBR" : "普通材质"} · ${formatFaces(asset.face_count)}` : "模型已生成"}`
     : asset.image_error_code
     ? `上次失败 · ${friendlyErrorCode(asset.image_error_code)}`
     : "尚未生成模型";
@@ -212,9 +223,9 @@ function renderViewControls() {
 function renderSelection() {
   const selectedAssets = state.workspace.assets.filter((asset) => state.selected.has(asset.asset_id));
   const processableAssets = selectedAssets.filter((asset) =>
-    ["source_frame", "awaiting_2d", "image_review", "rejected"].includes(asset.stage) && asset.model_status !== "complete"
+    ["source_frame", "awaiting_2d", "image_review", "rejected", "generation_failed"].includes(asset.stage) && asset.model_status !== "complete"
   );
-  const processableSources = new Set(processableAssets.map((asset) => asset.source_file_name || asset.asset_id));
+  const processableSources = new Set(processableAssets.map((asset) => asset.source_asset_ids?.[0] || asset.asset_id));
   const imageReviewCount = selectedAssets.filter((asset) => asset.stage === "image_review").length;
   const modelReviewCount = selectedAssets.filter((asset) => asset.stage === "model_review").length;
   const modelCount = selectedAssets.filter((asset) => asset.stage === "ready_for_3d").length;
@@ -226,21 +237,27 @@ function renderSelection() {
   $("#select-visible").disabled = visible.length === 0;
 
   $$(".stage-action").forEach((element) => { element.hidden = true; });
+  const download = $("#download-selected");
+  download.hidden = !selectedAssets.length;
+  download.disabled = state.downloading || !selectedAssets.length;
+  download.textContent = state.downloading ? "正在打包…" : `批量下载${selectedAssets.every(a => a.model_url) ? "模型" : "图片"}（${selectedAssets.length}）`;
   const hints = {
+    image_generation: "图片正在生成，任务中心可查看进度",
+    generation_failed: "打开详情查看原因；可到任务中心重试",
     all: "请进入具体环节执行批量操作",
-    source_frames: "选择来源静帧，可重新生成 1 张主视图或 3 张多视图",
-    awaiting_2d: "选择静帧，并设置每个来源生成 1 张或 3 张",
+    source_frames: "选择原始素材，生成完整的物体参考图",
+    awaiting_2d: "选择待处理图片，批量补全物体",
     image_review: "审核设计图，只能批量通过或批量驳回",
     ready_for_3d: "选择已通过2D审核的设计图生成3D",
     model_generation: "3D任务由服务端执行，请查看右下角进度",
     model_review: "审核3D结果，只能批量通过或批量驳回",
-    approved: "已通过资产可查看详情或下载GLB",
+    approved: "勾选模型后可批量打包下载，附资产清单",
     rejected: "选择驳回项，可重新提交到相应审核环节",
   };
   $("#stage-action-hint").textContent = hints[state.stage] || "";
 
   if (["source_frames", "awaiting_2d"].includes(state.stage)) {
-    $("#image-output-count").hidden = false;
+    $("#image-output-count").hidden = Boolean(state.workspace.configuration?.local_enabled);
     $("#process-2d").hidden = false;
     $("#process-2d").disabled = processableSources.size === 0;
     $("#process-2d").textContent = state.stage === "source_frames"
@@ -330,12 +347,14 @@ function beginInlineEdit(event) {
 function openAsset(assetId) {
   const asset = state.workspace.assets.find((item) => item.asset_id === assetId);
   if (!asset) return;
-  const sourceFrame = ["source_frame", "awaiting_2d"].includes(asset.stage);
+  const sourceFrame = Boolean(asset.is_source);
   const awaiting2D = asset.stage === "awaiting_2d";
   state.activeAsset = asset;
   $("#dialog-title").textContent = asset.title;
   const preview = sourceFrame
-    ? `<div class="compare-frame"><div class="pending-visual">${awaiting2D ? "等待批量优化 2D" : "已有2D结果，可重新优化"}</div><span>${awaiting2D ? "2D 尚未生成" : "从来源静帧重新生成资产视图"}</span></div>`
+    ? `<div class="compare-frame"><div class="pending-visual">${awaiting2D ? "等待批量优化 2D" : "已有2D结果，可重新优化"}</div><span>${awaiting2D ? "2D 尚未生成" : "从原始素材重新生成资产视图"}</span></div>`
+    : asset.model_url
+    ? `<div class="compare-frame"><model-viewer src="${asset.model_url}" camera-controls auto-rotate style="width:100%;height:360px" alt="${escapeHtml(asset.title)}模型"></model-viewer><span>模型预览 · 拖动旋转</span></div>`
     : asset.preview_url
     ? `<div class="compare-frame"><img src="${asset.preview_url}" alt="3D模型预览"><span>3D 模型预览</span></div>`
     : `<div class="compare-frame"><img src="${asset.image_url}" alt="等待生成3D"><span>3D 尚未生成</span></div>`;
@@ -353,12 +372,14 @@ function openAsset(assetId) {
         <div class="field"><label for="asset-title">资产名称</label><input id="asset-title" value="${escapeHtml(asset.title)}"></div>
         <div class="field"><label for="asset-tags">检索标签（使用逗号分隔）</label><input id="asset-tags" value="${escapeHtml((asset.tags || []).join(", "))}" placeholder="年代, 材质, 类别, 影片"></div>
         <div class="field"><label for="asset-notes">审核与制作备注</label><textarea id="asset-notes" placeholder="记录修图、拓扑、材质或入库要求">${escapeHtml(asset.notes || "")}</textarea></div>
+        ${assetRelations(asset)}
+        ${asset.generation_error ? `<p class="fact-error">${escapeHtml(asset.generation_error)}</p>` : ""}
         <div class="facts">
           <div class="fact"><span>资产 ID</span><strong>${asset.asset_id}</strong></div>
-          <div class="fact"><span>来源静帧</span><strong>${escapeHtml(asset.source_file_name || asset.source_name || "—")}</strong></div>
+          <div class="fact"><span>原始素材</span><strong>${escapeHtml(asset.source_file_name || asset.source_name || "—")}</strong></div>
           <div class="fact"><span>自动目标资产</span><strong>${escapeHtml(asset.target_name || "自动识别主要物品")}</strong></div>
           <div class="fact"><span>结果序号</span><strong>${asset.result_count ? `${asset.result_index}/${asset.result_count}` : "—"}</strong></div>
-          <div class="fact"><span>目标视图</span><strong>${escapeHtml(viewLabel(asset.result_index))}</strong></div>
+
           <div class="fact"><span>规范文件名</span><strong>${escapeHtml(asset.logical_file_name || "待生成")}</strong></div>
           <div class="fact"><span>2D 模型</span><strong>${escapeHtml(asset.image_model || (awaiting2D ? "等待处理" : asset.stage === "source_frame" ? "已有结果，可重新优化" : "—"))}</strong></div>
           ${asset.image_error_code ? `<div class="fact fact-error"><span>上次优化</span><strong>${escapeHtml(friendlyErrorCode(asset.image_error_code))}</strong></div><div class="fact fact-error"><span>处理建议</span><strong>${escapeHtml(friendlyErrorMessage(asset))}</strong></div>` : ""}
@@ -374,7 +395,8 @@ function openAsset(assetId) {
     </div>`;
   $("#save-metadata").addEventListener("click", saveMetadata);
   $$("[data-review]").forEach((button) => button.addEventListener("click", review));
-  $("#asset-dialog").showModal();
+  $$("[data-related-asset]").forEach(button => button.addEventListener("click", () => openAsset(button.dataset.relatedAsset)));
+  if (!$("#asset-dialog").open) $("#asset-dialog").showModal();
 }
 
 function reviewBlock(asset, stage) {
@@ -411,7 +433,7 @@ async function batchReview(decision) {
     .map((asset) => asset.asset_id);
   if (!assetIds.length) return;
   const action = decision === "approved" ? "通过" : "驳回";
-  if (decision === "rejected" && !confirm(`将驳回 ${assetIds.length} 项资产，并移动到“已驳回”。确认继续？`)) return;
+  if (decision === "rejected" && !confirm(`将驳回 ${assetIds.length} 项资产，并移动到“审核未通过”。确认继续？`)) return;
   try {
     const result = await api("/api/actions/review", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -458,7 +480,7 @@ async function uploadFrames(event) {
   const body = new FormData();
   files.forEach((file) => body.append("files", file));
   setUploading(true, files.length);
-  setJobBar(true, "正在上传静帧", `正在保存 ${files.length} 张图片…`);
+  setJobBar(true, "正在上传素材", `正在保存 ${files.length} 张图片…`);
   try {
     const result = await api("/api/frames/upload", { method: "POST", body });
     await loadWorkspace();
@@ -476,7 +498,7 @@ async function uploadFrames(event) {
 function setUploading(uploading, count = 0) {
   $("#frame-upload").disabled = uploading;
   $("#upload-action").classList.toggle("is-disabled", uploading);
-  $("#upload-text").textContent = uploading ? `正在上传 ${count} 张…` : "上传静帧";
+  $("#upload-text").textContent = uploading ? `正在上传 ${count} 张…` : "上传素材";
 }
 
 function showUploadResult(result) {
@@ -491,34 +513,34 @@ function showUploadResult(result) {
     ? `\n${(result.failed || []).map((item) => `${item.name}：${item.reason}`).join("\n")}`
     : "";
   if (!saved && skipped && !failed) {
-    showResultDialog("图片已存在", `所选图片已保存在“来源静帧”中。系统已跳过重复上传，你可以直接勾选原静帧重新优化。`, false);
+    showResultDialog("图片已存在", `所选图片已保存在“原始素材”中。系统已跳过重复上传，你可以直接勾选原静帧重新优化。`, false);
     return;
   }
   const title = failed ? (saved ? "部分上传完成" : "上传失败") : "上传完成";
-  const location = saved ? "。新增图片已显示在“待处理静帧”列表中" : "";
+  const location = saved ? "。新增图片已显示在“待处理图片”列表中" : "";
   showResultDialog(title, `${parts.join("，")}${location}${failureDetail}。`, failed > 0);
 }
 
 async function process2D() {
   const candidates = state.workspace.assets.filter((asset) =>
     state.selected.has(asset.asset_id)
-    && ["source_frame", "awaiting_2d", "image_review", "rejected"].includes(asset.stage)
+    && ["source_frame", "awaiting_2d", "image_review", "rejected", "generation_failed"].includes(asset.stage)
     && asset.model_status !== "complete"
   );
   const bySource = new Map();
   candidates.forEach((asset) => {
-    const key = asset.source_file_name || asset.asset_id;
+    const key = asset.source_asset_ids?.[0] || asset.asset_id;
     if (!bySource.has(key)) bySource.set(key, asset.asset_id);
   });
   const assetIds = [...bySource.values()];
   if (!assetIds.length) {
-    showResultDialog("请先选择资产", "请勾选待处理静帧或尚未进入3D的2D资产，再开始优化。", true);
+    showResultDialog("请先选择资产", "请勾选待处理图片或尚未进入3D的2D资产，再开始优化。", true);
     return;
   }
   const outputCount = Number($("#image-output-count").value) === 1 ? 1 : 3;
   const outputDescription = outputCount === 1 ? "1 张完整主视图" : "3 张不同视图";
   const estimatedImages = assetIds.length * outputCount;
-  if (!state.workspace.configuration?.local_enabled && !confirm(`将调用即梦 API 处理 ${assetIds.length} 个来源静帧，每个来源生成${outputDescription}，预计最多返回 ${estimatedImages} 张图片，可能产生费用。确认继续？`)) return;
+  if (!state.workspace.configuration?.local_enabled && !confirm(`将调用即梦 API 处理 ${assetIds.length} 个原始素材，每个来源生成${outputDescription}，预计最多返回 ${estimatedImages} 张图片，可能产生费用。确认继续？`)) return;
   try {
     const job = await api("/api/actions/process-2d", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -530,7 +552,7 @@ async function process2D() {
 
 async function generateSelected() {
   const assetIds = state.workspace.assets
-    .filter((asset) => state.selected.has(asset.asset_id) && asset.stage !== "awaiting_2d" && asset.image_review === "approved")
+    .filter((asset) => state.selected.has(asset.asset_id) && asset.stage === "ready_for_3d" && asset.image_review === "approved")
     .map((asset) => asset.asset_id);
   const profile = $("#generation-profile").value;
   const info = state.workspace.profiles[profile];
@@ -634,7 +656,7 @@ function formatDate(value) {
 }
 
 function reviewText(value) {
-  return ({ pending: "待审核", approved: "已通过", rejected: "已驳回" })[value] || "待审核";
+  return ({ pending: "待审核", approved: "已通过", rejected: "审核未通过" })[value] || "待审核";
 }
 
 function viewLabel(index) {
@@ -667,7 +689,7 @@ function applySettingsStatus(configuration) {
 }
 
 async function openSettings() {
-  if (state.workspace.configuration?.local_enabled) { location.href="/objects"; return; }
+  if (state.workspace.configuration?.local_enabled) { location.href="/objects#library"; return; }
   let configuration = state.workspace.configuration;
   if (!configuration) configuration = await api("/api/settings/status");
   applySettingsStatus(configuration);
@@ -740,6 +762,8 @@ function escapeHtml(value) {
 
 function activateStage(stage) {
   state.stage = stage;
+  state.taskFilter = null;
+  history.replaceState(null, "", stage === "all" ? "/" : `/?stage=${stage}`);
   state.selected.clear();
   $$(".stage-link").forEach((item) => item.classList.toggle("is-active", item.dataset.stage === stage));
   render();
@@ -781,6 +805,10 @@ $("#test-settings").addEventListener("click", testSettings);
 setJobBar(false);
 loadWorkspace()
   .then(() => {
+    const query = new URLSearchParams(location.search);
+    const stage = query.get("stage");
+    if (stageLabels[stage]) activateStage(stage);
+    if (query.get("asset")) openAsset(query.get("asset"));
     if (state.workspace.configuration?.setup_required) {
       openSettings().catch((error) => showResultDialog("设置加载失败", error.message, true));
     }
@@ -792,3 +820,38 @@ loadWorkspace()
     }
   })
   .catch((error) => showResultDialog("工作台加载失败", error.message, true));
+
+function assetRelations(asset) {
+  const links = (ids, label) => (ids || []).map(id => {
+    const related = state.workspace.assets.find(a => a.asset_id === id);
+    return related ? `<button class="button" type="button" data-related-asset="${id}">${label}：${escapeHtml(related.title)}</button>` : '';
+  }).join('');
+  return `<div class="asset-relations">${links(asset.source_asset_ids, '原始素材')}${links(asset.related_asset_ids, '生成结果')}${(asset.task_ids || []).filter(Boolean).map(id => `<a href="/objects?task=${encodeURIComponent(id)}#tasks">查看生成任务 ${escapeHtml(id.slice(0,8))}</a>`).join('')}</div>`;
+}
+
+async function downloadSelected() {
+  const selected = state.workspace.assets.filter(a => state.selected.has(a.asset_id));
+  if (!selected.length || state.downloading) return;
+  state.downloading = true; renderSelection();
+  try {
+    const kind = selected.every(a => a.model_url) ? 'model' : 'image';
+    const response = await fetch('/api/actions/download', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({asset_ids:selected.map(a => a.asset_id), kind}),
+    });
+    if (!response.ok) throw new Error((await response.json()).detail || '下载失败');
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a'); link.href = url;
+    link.download = `资产_${kind === 'model' ? '模型' : '图片'}_${selected.length}项.zip`;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast(`已打包 ${selected.length} 项资产`);
+  } catch (error) { toast(error.message, true); }
+  finally { state.downloading = false; renderSelection(); }
+}
+$('#download-selected').addEventListener('click', downloadSelected);
+async function refreshInventory() {
+  if (!document.hidden && !document.querySelector('.inline-editor')) await loadWorkspace().catch(() => {});
+  setTimeout(refreshInventory, 15000);
+}
+setTimeout(refreshInventory, 15000);

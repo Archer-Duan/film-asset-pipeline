@@ -60,11 +60,14 @@ def compile_workflow(workflow: dict, schema: dict, targets: list[int], overrides
     Named saved widgets take precedence; positional widgets support modern exports.
     Unsupported/missing inputs fail closed instead of silently changing the graph.
     """
+    if "nodes" not in workflow:
+        return compile_api_workflow(workflow, schema, targets, overrides)
     definitions = {
         g["id"]: g for g in workflow.get("definitions", {}).get("subgraphs", [])
     }
     result, cache, visiting = {}, {}, set()
     missing = object()
+    used_overrides = set()
 
     def context(graph, prefix="", boundary=None):
         links = {}
@@ -83,7 +86,7 @@ def compile_workflow(workflow: dict, schema: dict, targets: list[int], overrides
                 continue
             value = next(raw, missing)
             if value is not missing:
-                values[inp["name"]] = value
+                values.setdefault(inp["name"], value)
             if inp["name"] in ("seed", "noise_seed") and node["type"] == "KSampler":
                 next(raw, None)  # frontend's control_after_generate, not an API input
         return values
@@ -95,6 +98,7 @@ def compile_workflow(workflow: dict, schema: dict, targets: list[int], overrides
             name = inp["name"]
             if not prefix and (node["id"], name) in overrides:
                 values[name] = overrides[(node["id"], name)]
+                used_overrides.add((node["id"], name))
             elif inp.get("link") is not None:
                 origin, slot = links[inp["link"]]
                 value = (
@@ -145,6 +149,10 @@ def compile_workflow(workflow: dict, schema: dict, targets: list[int], overrides
                 raise ValueError(f"ComfyUI 缺少节点：{kind}")
             spec = schema[kind]["input"]
             allowed = {**spec.get("required", {}), **spec.get("optional", {})}
+            if not prefix:
+                for override_id, name in overrides:
+                    if override_id == nid and name not in allowed:
+                        raise ValueError(f"节点 {nid} 不接受参数 {name}")
             vals = {
                 k: v
                 for k, v in vals.items()
@@ -163,6 +171,8 @@ def compile_workflow(workflow: dict, schema: dict, targets: list[int], overrides
     root = context(workflow)
     for target in targets:
         resolve(root, target)
+    if set(overrides) - used_overrides:
+        raise ValueError("输入映射未连接到所选输出节点")
     # Constant branches were evaluated above; remove their unused dependencies.
     needed = set()
 
@@ -201,3 +211,53 @@ def validate_models(graph, schema):
             ):
                 errors.append(f"缺少模型：{value}")
     return sorted(set(errors))
+
+
+def compile_api_workflow(workflow, schema, targets, overrides):
+    graph = copy.deepcopy(workflow)
+    for (node_id, name), value in overrides.items():
+        node_id = str(node_id)
+        if node_id not in graph or name not in graph[node_id].get("inputs", {}):
+            raise ValueError(f"输入映射不存在：{node_id}.{name}")
+        graph[node_id]["inputs"][name] = value
+    result, visiting = {}, set()
+
+    def walk(nid):
+        nid = str(nid)
+        if nid in visiting:
+            raise ValueError("工作流包含循环连接")
+        if nid in result:
+            return
+        if nid not in graph:
+            raise ValueError(f"工作流缺少节点 {nid}")
+        visiting.add(nid)
+        node = graph[nid]
+        kind = node.get("class_type")
+        if kind not in schema:
+            raise ValueError(f"ComfyUI 缺少节点：{kind}")
+        if not isinstance(node.get("inputs"), dict):
+            raise ValueError(f"节点 {nid} 缺少 inputs")
+        spec = schema[kind]["input"]
+        allowed = {**spec.get("required", {}), **spec.get("optional", {})}
+        for node_id, name in overrides:
+            if str(node_id) == nid and name not in allowed:
+                raise ValueError(f"节点 {nid} 不接受参数 {name}")
+        for name in spec.get("required", {}):
+            if name not in node["inputs"]:
+                raise ValueError(f"节点 {nid} 缺少参数 {name}")
+        for value in node["inputs"].values():
+            if (
+                isinstance(value, list)
+                and len(value) == 2
+                and isinstance(value[0], str)
+                and type(value[1]) is int
+            ):
+                walk(value[0])
+        visiting.remove(nid)
+        result[nid] = {"class_type": kind, "inputs": node["inputs"]}
+
+    for target in targets:
+        walk(target)
+    if any(str(nid) not in result for nid, _ in overrides):
+        raise ValueError("输入映射未连接到所选输出节点")
+    return result
